@@ -114,6 +114,31 @@ MPIは空間を分割せず、独立な `(delta, mode, epsilon_fraction)` task�
 
 Phase1・2は後続解析用データの確立までを担当し、Phase3・4の臨界指数fitやdata collapseは含みません。
 
+## Spinodal Phase3-4
+
+Phase3・4は新しいsimulationではなく、既存の決定論的Gaussian closureのPhase1・2 CSVを読むserial post-processingです。数十行の表に対する回帰なのでMPIは使用しません。入力がなければPhase1・2を暗黙に再実行せず、明示的なエラーで停止します。
+
+Phase3ではprimary observableを mode_index=0, task_group=main, reliable=True の Gamma_from_lambda に固定し、Gamma0 は delta の1/2乗、tau0=1/Gamma0 は delta の-1/2乗というscalingを調べます。primary asymptotic windowは事前指定した delta <= 3e-4 であり、指数が理論値に近くなるよう自動選択しません。nearest 3〜7点のnested windowもすべて保存し、回帰standard errorはpower lawからの残差診断として扱います。tau0はGamma0から作るderived quantityであり、独立な指数測定ではありません。
+
+mean-field spinodal近傍の緩和時間に関する背景は Mori, Miyashita, and Rikvold, *Phys. Rev. E* **81**, 011135 (2010), [DOI:10.1103/PhysRevE.81.011135](https://doi.org/10.1103/PhysRevE.81.011135) を参照してください。係数 C_Gamma=sqrt(2|z_spinodal|/sigma_eff) はこのGaussian map固有です。
+
+Phase4ではPhase2の分散から xi_dyn=sqrt(D/Gamma0) を定義し、xi_dyn が delta の-1/4乗、tau0がxi_dynの2乗となること、および tau(q)/tau0=1/[1+(q xi_dyn)^2] のfinite-q collapseを検証します。これはPhase1・2の同じdynamic dataから導く内部整合性確認であり、xiやz=2の独立測定ではありません。構造はModel-A-likeな長波長relaxationですが、離散時間・非平衡mapを厳密なHohenberg–Halperin Model Aとは同一視しません。
+
+一般的背景は Hohenberg and Halperin, *Rev. Mod. Phys.* **49**, 435 (1977), [DOI:10.1103/RevModPhys.49.435](https://doi.org/10.1103/RevModPhys.49.435) を参照してください。実空間での独立検証は将来のPhase6 fixed-boundary responseによる xi_boundary との比較です。
+
+有限波数窓による約0.4%の D_fit-kappa_R 差については、同じmodeでのexact-kernel slopeと、-ln Khat_R(q)=kappa_R q^2+c4_R q^4+O(q^6) を使う q^2+q^4 fitを併記し、finite-q systematicとして評価します。
+
+実行:
+
+    python3 src/spinodal_phase34.py \
+      --phase0-dir results/runs/phase0_B2_R12 \
+      --phase12-dir results/runs/phase12_B2_R12 \
+      --primary-delta-max 3e-4 \
+      --qR-max-collapse 0.35 \
+      --output-dir results/runs/phase34_B2_R12
+
+または ./scripts/run_spinodal_phase34.sh を使用できます。主な出力は phase3_scaling_table.csv, phase3_powerlaw_fits.csv, phase3_window_stability.csv, phase3_effective_exponents.csv, phase4_length_table.csv, phase4_scaling_fits.csv, phase4_dispersion_systematics.csv, phase4_collapse.csv, phase34_validation_summary.json と10枚の診断図です。
+
 ## 実行例
 
 軽量な動作確認:
@@ -154,6 +179,7 @@ python3 scripts/replot_lambda_summary_vertical.py \
 - `src/spinodal_phase0.py`: スピノーダルと後続Phase用理論スケールの計算
 - `src/spinodal_phase12.py`: 決定論的closureの数値コアとPhase1・2解析
 - `src/spinodal_phase12_mpi.py`: serial/MPI task sweep driver
+- `src/spinodal_phase34.py`: Phase1・2 CSVからPhase3・4 scalingを解析するserial post-processing
 - `src/spatial_mode_presentation_materials_sweeps_v2.py`: 複数 seed・パラメータスイープ
 - `src/spatial_mode_presentation_materials_sweeps_mpi.py`: MPI 並列版
 - `scripts/replot_*.py`: 保存済み CSV から図を再作成
