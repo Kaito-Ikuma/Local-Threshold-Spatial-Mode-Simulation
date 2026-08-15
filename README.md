@@ -320,6 +320,26 @@ cat results/runs/phase5_B2_R12_pilot/phase5_M_convergence.csv
 
 `all_complete=true`であること、epsilonを0.025/0.05/0.10と変えてもGammaが統計誤差内で安定すること、Mを増やしたときにGammaと誤差が収束することを確認します。加えて `escape_fraction`、`baseline_drift`、`preparation_drift`、fit-window dependenceを確認します。substantial escapeや `reliable=false` が残る場合はproductionへ進まず、preparation protocol、Delta範囲、M、Tを再検討してください。
 
+##### preparation survival / microscopic pseudospinodal診断
+
+pilotで全条件が `escape_t0=1` になった場合は、Gammaやepsilon/M convergenceを再計算する前に、次の1-rank `direct_J` controlでspinodalから離れた領域を調べます。標準Phase0/12出力は上書きせず、同じGaussian-map式から診断用の `Delta` と `m_star` をMatplotlib非依存で計算します。
+
+```bash
+qsub scripts/run_phase5_squid_pseudospinodal_direct_j.sh
+qstat
+```
+
+既定条件は `delta=0.01,0.02,0.03,0.05,0.10`、`N=1024`、`M=64`、`block-size=32`、`mode=0`、`epsilon-fraction=0.05`、`T=2`、1 MPI rankです。計算後は次を確認します。
+
+```bash
+cat results/runs/phase5_pseudospinodal_direct_J/phase5_pseudospinodal_scan.csv
+
+"$PHASE5_PY" -m json.tool \
+  results/runs/phase5_pseudospinodal_direct_J/phase5_pseudospinodal_detail.json
+```
+
+`preparation_survives=true` は準備直後の `escape_t0<=0.1` を意味します。初めてfalseからtrueへ変わるdelta区間をmicroscopic pseudospinodalの追加診断範囲とし、この結果だけからtrue spinodalとは呼びません。
+
 #### Step 4: production
 
 pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` を [scripts/run_phase5_squid_intelmpi.sh](scripts/run_phase5_squid_intelmpi.sh) へ反映し、Intel MPI版productionを投入します。
@@ -339,7 +359,7 @@ cat results/runs/phase5_B2_R12/phase5_dispersion_fits.csv
 
 2 nodeまたは4 nodeへ増やす場合は、1 nodeベンチマークで不足が確認できた場合に限ります。2 nodeなら `#PBS -b 2`、`#PBS -l cpunum_job=76`、`mpirun -np 152`、4 nodeなら `#PBS -b 4`、`#PBS -l cpunum_job=76`、`mpirun -np 304` とします。どのrank数でもlauncherに同じ `"$PHASE5_PY"` を渡すため、Python pathはrank番号やnode数に依存しません。
 
-SQUIDの全PBS scriptは `--no-figures` を指定し、`matplotlib` をimportせずcheckpoint、CSV、JSONのみを生成します。PNG図はSQUID出力をローカルへ転送し、同じ物理オプションと `--resume --figures --max-runtime-seconds 0` で後から生成できます。
+通常のSQUID Phase5 PBS scriptは `--no-figures` を指定し、`matplotlib` をimportせずcheckpoint、CSV、JSONのみを生成します。pseudospinodal診断driverは図生成機能自体を持ちません。PNG図はSQUID出力をローカルへ転送し、同じ物理オプションと `--resume --figures --max-runtime-seconds 0` で後から生成できます。
 
 ### Troubleshooting
 
@@ -368,6 +388,7 @@ ldd "$PHASE5_VENV/bin/python" | grep -E "python|not found"
 - scripts/phase5_squid_preflight.sh: Python package、MPI、PBS context検査
 - scripts/check_phase5_mpi_python.sh: rankごとのPython絶対パス検査
 - scripts/run_phase5_squid_env_smoke.sh: 2-rank preflight PBS job
+- scripts/run_phase5_squid_pseudospinodal_direct_j.sh: 1-rank direct_J preparation-survival scan
 
 Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
 
