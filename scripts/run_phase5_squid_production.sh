@@ -1,7 +1,9 @@
 #!/bin/bash
-# Production wrapper. Select the MPI-flavor script only after the environment check.
+# Production wrapper for the BaseCPU / Intel MPI environment.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-python scripts/check_squid_mpi_env.py
-echo "Submit run_phase5_squid_openmpi.sh or run_phase5_squid_intelmpi.sh with qsub."
+module load BaseCPU
+source "$HOME/miniforge3/bin/activate" evac_env
+python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
+echo "Submit scripts/run_phase5_squid_intelmpi.sh with qsub."

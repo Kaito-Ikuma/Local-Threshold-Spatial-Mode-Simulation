@@ -27,7 +27,7 @@ source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 ```
 
-MPI 版を使う場合は、Open MPI などの MPI 実装を用意したうえで追加依存をインストールします。
+MPI 版を使う場合は、Intel MPI などの MPI 実装を用意したうえで追加依存をインストールします。SQUIDのPhase5は `BaseCPU` / Intel MPIを使用します。
 
 ```bash
 python3 -m pip install -r requirements-mpi.txt
@@ -175,37 +175,22 @@ python3 -m unittest discover -s tests -v
 
 最後に `OK` と表示されることを確認してください。MPI実行もローカルで試す場合は、利用中のMPI implementationを用意したうえで `python3 -m pip install -r requirements-mpi.txt` も実行します。
 
-#### Step 2: SQUID MPI environment check
+#### Step 2: SQUID BaseCPU / Intel MPI environment check
 
-SQUIDへloginし、計算に使う `evac_env` をactivateします。まず `mpi4py` 自身がどちらのMPIにlinkされているかを確認します。
+Phase5のSQUID実行は `BaseCPU` とIntel MPIに統一しています。SQUIDへloginし、`BaseCPU` をloadしてから計算に使う `evac_env` をactivateします。
 
 ```bash
 cd /path/to/Local-Threshold-Spatial-Mode-Simulation
-source "$HOME/miniforge3/bin/activate" evac_env
-python -c 'from mpi4py import MPI; print(MPI.Get_library_version())'
-```
-
-Open MPIと表示された場合:
-
-```bash
-module load BaseGCC
-which python
-which mpirun
-mpirun --version
-python scripts/check_squid_mpi_env.py --expected-flavor openmpi
-```
-
-Intel MPIと表示された場合:
-
-```bash
 module load BaseCPU
+source "$HOME/miniforge3/bin/activate" evac_env
 which python
 which mpirun
 mpirun --version
+python -c 'from mpi4py import MPI; print(MPI.Get_library_version())'
 python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 ```
 
-checkerがexit code 0で終了し、`mpi_library_flavor` と `mpirun_flavor` が一致することを確認します。不一致な場合はjobを投入せず、`mpi4py` を使用するMPIでbuildし直してください。現在のbenchmark、scaling、pilot scriptはOpenMPI用です。Intel MPI環境で使うときは `run_phase5_squid_intelmpi.sh` と同じPBS type、module、checker指定に変更します。
+checkerがexit code 0で終了し、`mpi_library_flavor` と `mpirun_flavor` がどちらも `intelmpi` になることを確認します。不一致な場合はjobを投入せず、`BaseCPU` が提供するIntel MPIを使って `mpi4py` をbuildし直してください。benchmark、scaling、pilot、productionの全PBS scriptは `#PBS -T intmpi`、`module load BaseCPU`、`--expected-flavor intelmpi` を使用します。
 
 #### Step 3: kernel・block size・MPI scaling benchmark
 
@@ -239,7 +224,7 @@ cat results/runs/phase5_scaling_benchmark/phase5_mpi_scaling_benchmark.csv
 
 #### Step 4: epsilon・M convergence pilot
 
-Step 3で選んだblock sizeとrank数を [scripts/run_phase5_squid_pilot.sh](scripts/run_phase5_squid_pilot.sh) の `--block-size`、`-np`、`-npernode` へ反映したうえでpilotを投入します。
+Step 3で選んだblock sizeとrank数を [scripts/run_phase5_squid_pilot.sh](scripts/run_phase5_squid_pilot.sh) の `--block-size`と `-np` へ反映したうえでpilotを投入します。
 
 ```bash
 qsub scripts/run_phase5_squid_pilot.sh
@@ -261,15 +246,7 @@ cat results/runs/phase5_B2_R12_pilot/phase5_M_convergence.csv
 
 #### Step 5: production
 
-pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` をproduction scriptへ反映します。Step 2で確認したMPI flavorと同じscriptだけを投入してください。
-
-OpenMPIの場合:
-
-```bash
-qsub scripts/run_phase5_squid_openmpi.sh
-```
-
-Intel MPIの場合:
+pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` を [scripts/run_phase5_squid_intelmpi.sh](scripts/run_phase5_squid_intelmpi.sh) へ反映し、Intel MPI版productionを投入します。
 
 ```bash
 qsub scripts/run_phase5_squid_intelmpi.sh
@@ -286,15 +263,14 @@ cat results/runs/phase5_B2_R12/phase5_dispersion_fits.csv
 
 2 nodeまたは4 nodeへ増やす場合は、1 nodeベンチマークで不足が確認できた場合に限ります。2 nodeなら `#PBS -b 2`、`#PBS -l cpunum_job=76`、`mpirun -np 152`、4 nodeなら `#PBS -b 4`、`#PBS -l cpunum_job=76`、`mpirun -np 304` とし、`WORLD_SIZE <= allocated cores` の起動時検査が通ることを確認してください。
 
-現行SQUID公式手順では汎用CPUノードは76並列/ノードです。OpenMPIは PBS type openmpi、NQSV_MPI_MODULE=BaseGCC、Intel MPIはPBS type intmpiを使い、どちらも mpirun NQSV_MPIOPTS 形式です。環境変数を全nodeへ渡すためPBS -vでOMP、OpenBLAS、MKL、NumExprを1 threadに固定します。詳細は大阪大学D3センターの[OpenMPI手順](https://www.hpc.cmc.osaka-u.ac.jp/system/manual/squid-use/cpu-openmpi/)と[Intel MPI手順](https://www.hpc.cmc.osaka-u.ac.jp/en/system/manual/squid-use/cpu-intelmpi-hybrid/)を参照してください。active evac_envのmpi4py flavorと一致するscriptだけを使用してください。
+現行SQUID公式手順では汎用CPUノードは76並列/ノードです。Phase5ではPBS typeを `intmpi`、moduleを `BaseCPU`、起動形式を `mpirun ${NQSV_MPIOPTS}` に統一しています。環境変数を全nodeへ渡すためPBS `-v` でOMP、OpenBLAS、MKL、NumExprを1 threadに固定します。詳細は大阪大学D3センターの[Intel MPI手順](https://www.hpc.cmc.osaka-u.ac.jp/en/system/manual/squid-use/cpu-intelmpi-hybrid/)を参照してください。
 
 主要script:
 
 - scripts/run_phase5_squid_benchmark.sh: single-core kernel/block-size benchmark
 - scripts/run_phase5_squid_scaling_benchmark.sh: 19/38/57/76 rank benchmark
 - scripts/run_phase5_squid_pilot.sh: 3 delta × 3 mode × 3 epsilon pilot
-- scripts/run_phase5_squid_openmpi.sh: OpenMPI production template
-- scripts/run_phase5_squid_intelmpi.sh: Intel MPI production template
+- scripts/run_phase5_squid_intelmpi.sh: BaseCPU / Intel MPI production template
 
 Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
 

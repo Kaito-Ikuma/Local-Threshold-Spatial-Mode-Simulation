@@ -4,8 +4,7 @@
 #PBS -b 1
 #PBS -l cpunum_job=76
 #PBS -l elapstim_req=02:00:00
-#PBS -T openmpi
-#PBS -v NQSV_MPI_MODULE=BaseGCC
+#PBS -T intmpi
 #PBS -v OMP_NUM_THREADS=1
 #PBS -v OPENBLAS_NUM_THREADS=1
 #PBS -v MKL_NUM_THREADS=1
@@ -13,15 +12,15 @@
 set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
-module load BaseGCC
+module load BaseCPU
 source "$HOME/miniforge3/bin/activate" evac_env
-python scripts/check_squid_mpi_env.py --expected-flavor openmpi
+python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 
 SCALING_ROOT=results/runs/phase5_scaling_benchmark
 mkdir -p "$SCALING_ROOT"
 for MPI_RANKS in 19 38 57 76; do
   OUTPUT_DIR="$SCALING_ROOT/np_$MPI_RANKS"
-  mpirun $NQSV_MPIOPTS -np "$MPI_RANKS" -npernode "$MPI_RANKS" \
+  mpirun $NQSV_MPIOPTS -np "$MPI_RANKS" \
     python src/spinodal_phase5_mpi.py \
     --N 256 \
     --deltas 1e-3 \
