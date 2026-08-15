@@ -139,6 +139,167 @@ Phase4ではPhase2の分散から xi_dyn=sqrt(D/Gamma0) を定義し、xi_dyn �
 
 または ./scripts/run_spinodal_phase34.sh を使用できます。主な出力は phase3_scaling_table.csv, phase3_powerlaw_fits.csv, phase3_window_stability.csv, phase3_effective_exponents.csv, phase4_length_table.csv, phase4_scaling_fits.csv, phase4_dispersion_systematics.csv, phase4_collapse.csv, phase34_validation_summary.json と10枚の診断図です。
 
+## Spinodal Phase5
+
+Phase5は元の二値microscopic dynamicsによるPhase0〜4 Gaussian closureのrobustness / breakdown testです。同じ指数を強制せず、Gaussian-centered deltaを固定したまま、spinodal位置のshift、finite-R rounding、metastable escape、Gamma(q)とDのずれを測ります。有限range系にはtrue spinodalという表現を自動的に使わず、必要ならeffective microscopic transitionまたはpseudospinodal-like crossoverと記述します。
+
+reference kernel direct_J は既存実装と同じく、2R本のannealed Gaussian J場をstepごとに生成し、plus/minusへ同じJ、初期一様乱数、quenched thresholdを共有します。削除せずcorrectness referenceとして保持しています。
+
+production既定の aggregated_exact は、現在のspin pairを固定した条件付き分布を厳密に積分します。c=2R、局所平均をm_plus, m_minus、局所overlapをrhoとすると、noise varianceは sigma_J^2/c、plus/minus covarianceは sigma_J^2 rho/cです。二つの標準Gaussian Z1,Z2から、plus noiseを sigma_J Z1/sqrt(c)、minus noiseを sigma_J[rho Z1+sqrt(1-rho^2)Z2]/sqrt(c) と生成します。これはcentral-limit approximationではありません。周期近傍和はcumulative sumによりblock×Nに対してO(block N)で計算します。
+
+乱数はNumPy Philoxを用い、base seed、delta index、mode index、epsilon index、block IDだけからstreamを決めます。MPI rank数はseedへ入りません。この設計の背景は Salmon, Moraes, Dror, and Shaw, “Parallel Random Numbers: As Easy as 1, 2, 3,” SC11 (2011), [Random123](https://random123.com/) を参照してください。
+
+MPIはsite空間を分割しません。work unitは (delta, mode, epsilon, block ID) で、各rankはblockを最後まで独立実行します。rank0はestimated cost降順のLPT greedy assignmentを作り、time step中のallreduce、gather、halo exchangeは行いません。1 block完了ごとにblocksディレクトリへatomic checkpointを書き、同じcommandの --resume で有効なblockをskipします。15時間jobでは --max-runtime-seconds 53400 により新規block開始を早めに止め、再投入できます。
+
+### SQUIDでの実行手順
+
+以下のコマンドはすべてリポジトリのrootで実行します。SQUID側に `results/runs/phase0_B2_R12` と `results/runs/phase12_B2_R12` が必要です。`results/runs/` はGit管理対象外なので、ローカルで作成した場合はSQUIDへ別途転送するか、先にPhase0とPhase1・2をSQUID上で実行してください。
+
+```bash
+test -f results/runs/phase0_B2_R12/phase0_summary.json
+test -f results/runs/phase0_B2_R12/phase0_delta_table.csv
+test -f results/runs/phase12_B2_R12/phase12_mode_results.csv
+test -f results/runs/phase12_B2_R12/phase12_dispersion_fits.csv
+```
+
+#### Step 1: local unit tests
+
+まずMacまたはローカル開発環境で全Phaseのtestを実行します。
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+python3 -m unittest discover -s tests -v
+```
+
+最後に `OK` と表示されることを確認してください。MPI実行もローカルで試す場合は、利用中のMPI implementationを用意したうえで `python3 -m pip install -r requirements-mpi.txt` も実行します。
+
+#### Step 2: SQUID MPI environment check
+
+SQUIDへloginし、計算に使う `evac_env` をactivateします。まず `mpi4py` 自身がどちらのMPIにlinkされているかを確認します。
+
+```bash
+cd /path/to/Local-Threshold-Spatial-Mode-Simulation
+source "$HOME/miniforge3/bin/activate" evac_env
+python -c 'from mpi4py import MPI; print(MPI.Get_library_version())'
+```
+
+Open MPIと表示された場合:
+
+```bash
+module load BaseGCC
+which python
+which mpirun
+mpirun --version
+python scripts/check_squid_mpi_env.py --expected-flavor openmpi
+```
+
+Intel MPIと表示された場合:
+
+```bash
+module load BaseCPU
+which python
+which mpirun
+mpirun --version
+python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
+```
+
+checkerがexit code 0で終了し、`mpi_library_flavor` と `mpirun_flavor` が一致することを確認します。不一致な場合はjobを投入せず、`mpi4py` を使用するMPIでbuildし直してください。現在のbenchmark、scaling、pilot scriptはOpenMPI用です。Intel MPI環境で使うときは `run_phase5_squid_intelmpi.sh` と同じPBS type、module、checker指定に変更します。
+
+#### Step 3: kernel・block size・MPI scaling benchmark
+
+最初に1 coreで `direct_J` と `aggregated_exact`、block size 16/32/64/128を比較します。
+
+```bash
+qsub scripts/run_phase5_squid_benchmark.sh
+qstat
+```
+
+job終了後に結果を確認します。
+
+```bash
+python -m json.tool \
+  results/runs/phase5_B2_R12/benchmarks/phase5_kernel_benchmark.json
+cat results/runs/phase5_B2_R12/benchmarks/phase5_block_size_benchmark.csv
+```
+
+次に同一条件を19/38/57/76 ranksで実行します。kernel benchmarkの完了後に投入してください。
+
+```bash
+qsub scripts/run_phase5_squid_scaling_benchmark.sh
+qstat
+```
+
+```bash
+cat results/runs/phase5_scaling_benchmark/phase5_mpi_scaling_benchmark.csv
+```
+
+`aggregated_exact` のthroughputが最も高く、メモリ使用量に余裕があるblock sizeを選びます。production rank数は、単に76を固定せず `trial_site_steps_per_sec` と `parallel_efficiency` の実測値から選んでください。
+
+#### Step 4: epsilon・M convergence pilot
+
+Step 3で選んだblock sizeとrank数を [scripts/run_phase5_squid_pilot.sh](scripts/run_phase5_squid_pilot.sh) の `--block-size`、`-np`、`-npernode` へ反映したうえでpilotを投入します。
+
+```bash
+qsub scripts/run_phase5_squid_pilot.sh
+qstat
+```
+
+15時間内に全blockが完了しなかった場合もcheckpointは残ります。同じscriptを再度 `qsub` すると `--resume` により未完了blockだけを続行します。完了後は次を確認します。
+
+```bash
+python -m json.tool \
+  results/runs/phase5_B2_R12_pilot/phase5_run_state.json
+python -m json.tool \
+  results/runs/phase5_B2_R12_pilot/phase5_validation_summary.json
+cat results/runs/phase5_B2_R12_pilot/phase5_epsilon_convergence.csv
+cat results/runs/phase5_B2_R12_pilot/phase5_M_convergence.csv
+```
+
+`all_complete=true`であること、epsilonを0.025/0.05/0.10と変えてもGammaが統計誤差内で安定すること、Mを増やしたときにGammaと誤差が収束することを確認します。加えて `escape_fraction`、`baseline_drift`、`preparation_drift`、fit-window dependenceを確認します。substantial escapeや `reliable=false` が残る場合はproductionへ進まず、preparation protocol、Delta範囲、M、Tを再検討してください。
+
+#### Step 5: production
+
+pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` をproduction scriptへ反映します。Step 2で確認したMPI flavorと同じscriptだけを投入してください。
+
+OpenMPIの場合:
+
+```bash
+qsub scripts/run_phase5_squid_openmpi.sh
+```
+
+Intel MPIの場合:
+
+```bash
+qsub scripts/run_phase5_squid_intelmpi.sh
+```
+
+途中終了した場合は同じscriptを再投入します。全block完了後に以下を確認します。
+
+```bash
+python -m json.tool results/runs/phase5_B2_R12/phase5_run_state.json
+python -m json.tool results/runs/phase5_B2_R12/phase5_validation_summary.json
+cat results/runs/phase5_B2_R12/phase5_mode_results.csv
+cat results/runs/phase5_B2_R12/phase5_dispersion_fits.csv
+```
+
+2 nodeまたは4 nodeへ増やす場合は、1 nodeベンチマークで不足が確認できた場合に限ります。2 nodeなら `#PBS -b 2`、`#PBS -l cpunum_job=76`、`mpirun -np 152`、4 nodeなら `#PBS -b 4`、`#PBS -l cpunum_job=76`、`mpirun -np 304` とし、`WORLD_SIZE <= allocated cores` の起動時検査が通ることを確認してください。
+
+現行SQUID公式手順では汎用CPUノードは76並列/ノードです。OpenMPIは PBS type openmpi、NQSV_MPI_MODULE=BaseGCC、Intel MPIはPBS type intmpiを使い、どちらも mpirun NQSV_MPIOPTS 形式です。環境変数を全nodeへ渡すためPBS -vでOMP、OpenBLAS、MKL、NumExprを1 threadに固定します。詳細は大阪大学D3センターの[OpenMPI手順](https://www.hpc.cmc.osaka-u.ac.jp/system/manual/squid-use/cpu-openmpi/)と[Intel MPI手順](https://www.hpc.cmc.osaka-u.ac.jp/en/system/manual/squid-use/cpu-intelmpi-hybrid/)を参照してください。active evac_envのmpi4py flavorと一致するscriptだけを使用してください。
+
+主要script:
+
+- scripts/run_phase5_squid_benchmark.sh: single-core kernel/block-size benchmark
+- scripts/run_phase5_squid_scaling_benchmark.sh: 19/38/57/76 rank benchmark
+- scripts/run_phase5_squid_pilot.sh: 3 delta × 3 mode × 3 epsilon pilot
+- scripts/run_phase5_squid_openmpi.sh: OpenMPI production template
+- scripts/run_phase5_squid_intelmpi.sh: Intel MPI production template
+
+Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
+
+Phase5のprimary出力はphase5_mode_results.csv、phase5_dispersion_fits.csv、phase5_scaling_summary.csv、phase5_validation_summary.jsonです。pilotではphase5_epsilon_convergence.csvとphase5_M_convergence.csvも生成します。full structure factorは既定OFFで、代表debug条件に限り --save-structure-factor で保存できます。
+
 ## 実行例
 
 軽量な動作確認:
@@ -180,6 +341,9 @@ python3 scripts/replot_lambda_summary_vertical.py \
 - `src/spinodal_phase12.py`: 決定論的closureの数値コアとPhase1・2解析
 - `src/spinodal_phase12_mpi.py`: serial/MPI task sweep driver
 - `src/spinodal_phase34.py`: Phase1・2 CSVからPhase3・4 scalingを解析するserial post-processing
+- `src/spinodal_phase5_core.py`: MPI非依存microscopic kernels、block simulation、checkpoint
+- `src/spinodal_phase5_mpi.py`: weighted ensemble-block MPI driverとserial fallback
+- `src/spinodal_phase5_analysis.py`: block bootstrap、closure比較、分散・図のrank0解析
 - `src/spatial_mode_presentation_materials_sweeps_v2.py`: 複数 seed・パラメータスイープ
 - `src/spatial_mode_presentation_materials_sweeps_mpi.py`: MPI 並列版
 - `scripts/replot_*.py`: 保存済み CSV から図を再作成
