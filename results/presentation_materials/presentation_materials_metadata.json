@@ -1,0 +1,49 @@
+{
+  "script_version": "2026.08.03-sweeps-mpi-v1",
+  "mpi_world_size": 4,
+  "mpi_active": true,
+  "base_script": "/Users/ikuma_kaito/Documents/大阪大学関係/2026年_前期/研究/シミュレーション/local_threshold/spatial_mode_ensemble_validation.py",
+  "matched_config": {
+    "N": 96,
+    "R": 12,
+    "T": 40,
+    "ensemble": 2000,
+    "lattice_spacing": 1.0,
+    "B": 0.72,
+    "sigma_J": 1.0,
+    "sigma_phi": 0.06,
+    "phi_bar": 0.0,
+    "h": 0.0,
+    "epsilon": 0.05,
+    "fixed_point_guess": 0.0,
+    "rng_seed": 20260801,
+    "fit_steps": 4,
+    "dynamics": "gaussian_map"
+  },
+  "modes": [
+    0,
+    1,
+    2,
+    4,
+    6,
+    8
+  ],
+  "selected_mode": 2,
+  "negative_mode": 6,
+  "n_seeds": 12,
+  "scan_n_seeds": 8,
+  "seed0": 20260801,
+  "gaussian": {
+    "m_star": 0.0,
+    "Lambda_star": 0.72,
+    "mu": 0.1919913633361862,
+    "sigma_eff": 0.2127596452964393
+  },
+  "microscopic": {
+    "m_star": 0.0,
+    "Lambda_star": 0.72,
+    "mu": 0.1919913633361862,
+    "sigma_eff": 0.2127596452964393
+  },
+  "parallelization": "seed-level MPI decomposition; one seed is computed by exactly one rank; plotting and file output are root-only"
+}

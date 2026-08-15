@@ -1,0 +1,31 @@
+# macOS / editors
+.DS_Store
+**/.DS_Store
+tempCodeRunnerFile.py
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Local logs and disposable simulation runs
+*.log
+results/runs/
+results/spatial_mode_ensemble_output/

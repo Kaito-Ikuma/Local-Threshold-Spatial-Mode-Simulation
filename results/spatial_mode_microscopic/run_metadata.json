@@ -1,0 +1,42 @@
+{
+  "config": {
+    "N": 96,
+    "R": 12,
+    "T": 40,
+    "ensemble": 2000,
+    "lattice_spacing": 1.0,
+    "B": 0.72,
+    "sigma_J": 1.0,
+    "sigma_phi": 0.06,
+    "phi_bar": 0.0,
+    "h": 0.0,
+    "epsilon": 0.05,
+    "fixed_point_guess": 0.0,
+    "rng_seed": 20260731,
+    "fit_steps": 5,
+    "dynamics": "microscopic"
+  },
+  "modes": [
+    0,
+    1,
+    2,
+    4,
+    6,
+    8
+  ],
+  "animate_mode": 2,
+  "mu": 0.1919913633361862,
+  "sigma_eff": 0.2127596452964393,
+  "fixed_points": [
+    0.0
+  ],
+  "chosen_fixed_point": 0.0,
+  "Lambda_star": 0.72,
+  "dynamics": "microscopic",
+  "definitions": {
+    "coherent_response_spectrum": "FFT((ensemble_mean_plus-ensemble_mean_minus)/2) / N",
+    "direct_coherent_plus_spectrum": "FFT(ensemble_mean_plus-m_star) / N",
+    "cosine_amplitude": "2 Re(Abar_q), except n=0/Nyquist where factor=1",
+    "structure_factor": "mean(|FFT(S_alpha - mean_i S_alpha)|^2) / N"
+  }
+}
