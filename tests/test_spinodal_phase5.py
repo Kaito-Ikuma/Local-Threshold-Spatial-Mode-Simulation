@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import sys
 import unittest
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -301,6 +302,33 @@ class SpinodalPhase5Tests(unittest.TestCase):
             block.block_n for block in blocks
         )
         np.testing.assert_array_equal(aggregate["A_q"], explicit)
+
+    def test_14_compute_only_path_does_not_import_matplotlib(self) -> None:
+        code = f"""
+import builtins
+import sys
+import tempfile
+from pathlib import Path
+
+real_import = builtins.__import__
+def blocked_import(name, *args, **kwargs):
+    if name == 'matplotlib' or name.startswith('matplotlib.'):
+        raise ModuleNotFoundError('matplotlib intentionally unavailable')
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = blocked_import
+sys.path.insert(0, {str(SRC_DIR)!r})
+from spinodal_phase5_analysis import Phase5Analysis, write_phase5_analysis
+import pandas as pd
+
+empty = pd.DataFrame()
+analysis = Phase5Analysis(empty, empty, empty, empty, empty, empty, {{}})
+with tempfile.TemporaryDirectory() as directory:
+    paths = write_phase5_analysis(analysis, Path(directory), make_figures=False)
+    assert 'validation_summary' in paths
+assert not any(name == 'matplotlib' or name.startswith('matplotlib.') for name in sys.modules)
+"""
+        subprocess.run([sys.executable, "-c", code], check=True)
 
 
 if __name__ == "__main__":

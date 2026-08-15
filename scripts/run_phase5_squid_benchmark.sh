@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
 module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_env
+source "$HOME/miniforge3/bin/activate" evac_sim
 python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 
 mpirun $NQSV_MPIOPTS -np 1 \
@@ -26,4 +26,5 @@ mpirun $NQSV_MPIOPTS -np 1 \
   --benchmark-only \
   --benchmark-block-sizes 16,32,64,128 \
   --benchmark-steps 50 \
+  --no-figures \
   --output-dir results/runs/phase5_B2_R12

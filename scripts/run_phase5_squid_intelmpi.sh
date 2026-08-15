@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
 module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_env
+source "$HOME/miniforge3/bin/activate" evac_sim
 
 which python
 which mpirun
@@ -35,5 +35,6 @@ mpirun $NQSV_MPIOPTS -np 76 \
   --initialization prepared_metastable \
   --stage production \
   --resume \
+  --no-figures \
   --max-runtime-seconds 53400 \
   --output-dir results/runs/phase5_B2_R12

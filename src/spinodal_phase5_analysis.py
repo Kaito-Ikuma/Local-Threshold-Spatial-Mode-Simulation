@@ -10,15 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from spatial_mode_ensemble_validation import Config, kernel_hat
-from spinodal_phase34 import fit_power_law
 from spinodal_phase5_core import (
     SCRIPT_VERSION,
     Phase5BlockResult,
@@ -66,6 +60,51 @@ def _r_squared(observed: np.ndarray, predicted: np.ndarray) -> float:
     sse = float(np.sum((observed - predicted) ** 2))
     sst = float(np.sum((observed - np.mean(observed)) ** 2))
     return 1.0 - sse / sst if sst > np.finfo(float).tiny else math.nan
+
+
+def fit_power_law(
+    x: Sequence[float], y: Sequence[float]
+) -> dict[str, float | int]:
+    """Fit y=A*x**p without importing the plotting-oriented Phase3-4 module."""
+    x_array = np.asarray(x, dtype=float)
+    y_array = np.asarray(y, dtype=float)
+    if x_array.ndim != 1 or y_array.ndim != 1 or len(x_array) != len(y_array):
+        raise ValueError("x and y must be one-dimensional arrays of equal length")
+    if len(x_array) < 2:
+        raise ValueError("power-law fit requires at least two points")
+    if (
+        not np.all(np.isfinite(x_array))
+        or not np.all(np.isfinite(y_array))
+        or np.any(x_array <= 0.0)
+        or np.any(y_array <= 0.0)
+    ):
+        raise ValueError("power-law fit requires positive finite x and y")
+    log_x = np.log(x_array)
+    log_y = np.log(y_array)
+    design = np.column_stack((np.ones_like(log_x), log_x))
+    beta, _, _, _ = np.linalg.lstsq(design, log_y, rcond=None)
+    predicted = design @ beta
+    exponent_se = math.nan
+    if len(log_x) > 2:
+        residual_variance = float(
+            np.sum((log_y - predicted) ** 2) / (len(log_x) - 2)
+        )
+        covariance = residual_variance * np.linalg.inv(design.T @ design)
+        exponent_se = math.sqrt(max(float(covariance[1, 1]), 0.0))
+    return {
+        "amplitude": float(math.exp(beta[0])),
+        "exponent": float(beta[1]),
+        "exponent_regression_se": float(exponent_se),
+        "r2": float(_r_squared(log_y, predicted)),
+        "n_points": int(len(x_array)),
+    }
+
+
+def kernel_hat(mode_index: int, N: int, R: int) -> float:
+    """Return the 1D top-hat kernel without importing plotting dependencies."""
+    q = 2.0 * math.pi * mode_index / N
+    distances = np.arange(1, R + 1, dtype=float)
+    return float(np.mean(np.cos(q * distances)))
 
 
 def aggregate_block_series(
@@ -616,12 +655,12 @@ def run_phase5_analysis(
         if q0_group.empty:
             continue
         gamma0 = float(q0_group["Gamma_micro"].iloc[0])
-        config = Config(
-            N=int(group["N"].iloc[0]),
-            R=int(group["R"].iloc[0]),
-        )
+        N = int(group["N"].iloc[0])
+        R = int(group["R"].iloc[0])
         for _, row in group.iterrows():
-            exact = -math.log(abs(kernel_hat(int(row["mode_index"]), config)))
+            exact = -math.log(
+                abs(kernel_hat(int(row["mode_index"]), N, R))
+            )
             kernel_deviations.append(
                 abs((float(row["Gamma_micro"]) - gamma0) - exact)
             )
@@ -717,6 +756,17 @@ def run_phase5_analysis(
 
 
 def _make_figures(analysis: Phase5Analysis, output_dir: Path) -> dict[str, Path]:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "figure generation requires matplotlib; rerun with --no-figures "
+            "on compute-only environments"
+        ) from exc
+
     figures = output_dir / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     mode = analysis.mode_results
@@ -795,10 +845,11 @@ def _make_figures(analysis: Phase5Analysis, output_dir: Path) -> dict[str, Path]
         if q0_group.empty:
             continue
         gamma0 = float(q0_group["Gamma_micro"].iloc[0])
-        config = Config(N=int(group["N"].iloc[0]), R=int(group["R"].iloc[0]))
+        N = int(group["N"].iloc[0])
+        R = int(group["R"].iloc[0])
         deviation = [
             (float(row["Gamma_micro"]) - gamma0)
-            + math.log(abs(kernel_hat(int(row["mode_index"]), config)))
+            + math.log(abs(kernel_hat(int(row["mode_index"]), N, R)))
             for _, row in group.iterrows()
         ]
         ax.plot(group["qR"], deviation, "o-", label=f"{delta:g}")
@@ -847,7 +898,10 @@ def _make_figures(analysis: Phase5Analysis, output_dir: Path) -> dict[str, Path]
 
 
 def write_phase5_analysis(
-    analysis: Phase5Analysis, output_dir: Path
+    analysis: Phase5Analysis,
+    output_dir: Path,
+    *,
+    make_figures: bool = True,
 ) -> dict[str, Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -872,5 +926,6 @@ def write_phase5_analysis(
         json.dumps(analysis.validation_summary, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    paths.update(_make_figures(analysis, output_dir))
+    if make_figures:
+        paths.update(_make_figures(analysis, output_dir))
     return paths

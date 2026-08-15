@@ -421,6 +421,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-block-sizes", type=parse_int_list, default=(16, 32, 64, 128))
     parser.add_argument("--benchmark-steps", type=int, default=50)
     parser.add_argument(
+        "--figures",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="generate PNG figures on rank 0; use --no-figures on SQUID",
+    )
+    parser.add_argument(
         "--save-structure-factor",
         action="store_true",
         help="debug only: save the full plus-side structure factor in block checkpoints",
@@ -649,7 +655,9 @@ def main() -> None:
                 performance=performance,
                 reproducibility=reproducibility,
             )
-            paths = write_phase5_analysis(analysis, args.output_dir)
+            paths = write_phase5_analysis(
+                analysis, args.output_dir, make_figures=args.figures
+            )
             print(
                 f"[Phase5] completed {len(all_units)} blocks in "
                 f"{time.perf_counter() - total_start:.3f} s with {WORLD_SIZE} rank(s)",

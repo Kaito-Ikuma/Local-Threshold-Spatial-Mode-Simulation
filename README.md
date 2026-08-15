@@ -177,12 +177,12 @@ python3 -m unittest discover -s tests -v
 
 #### Step 2: SQUID BaseCPU / Intel MPI environment check
 
-Phase5のSQUID実行は `BaseCPU` とIntel MPIに統一しています。SQUIDへloginし、`BaseCPU` をloadしてから計算に使う `evac_env` をactivateします。
+Phase5のSQUID実行は `BaseCPU` とIntel MPIに統一しています。SQUIDへloginし、`BaseCPU` をloadしてから計算に使う `evac_sim` をactivateします。
 
 ```bash
 cd /path/to/Local-Threshold-Spatial-Mode-Simulation
 module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_env
+source "$HOME/miniforge3/bin/activate" evac_sim
 which python
 which mpirun
 mpirun --version
@@ -191,6 +191,8 @@ python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 ```
 
 checkerがexit code 0で終了し、`mpi_library_flavor` と `mpirun_flavor` がどちらも `intelmpi` になることを確認します。不一致な場合はjobを投入せず、`BaseCPU` が提供するIntel MPIを使って `mpi4py` をbuildし直してください。benchmark、scaling、pilot、productionの全PBS scriptは `#PBS -T intmpi`、`module load BaseCPU`、`--expected-flavor intelmpi` を使用します。
+
+SQUIDの全PBS scriptは `--no-figures` を指定します。このモードでは `matplotlib` をimportせず、checkpoint、CSV、JSONのみを生成するため、`evac_sim` に `matplotlib` は不要です。PNG図はSQUID出力をローカルへ転送し、`matplotlib` が入った環境で同じ物理オプションと `--resume --figures --max-runtime-seconds 0` を指定して生成します。`0`秒制限により、設定が一致せずcheckpointを再利用できない場合もローカルで大規模simulationを開始しません。
 
 #### Step 3: kernel・block size・MPI scaling benchmark
 

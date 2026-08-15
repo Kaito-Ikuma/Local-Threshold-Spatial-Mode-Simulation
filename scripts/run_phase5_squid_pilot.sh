@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
 module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_env
+source "$HOME/miniforge3/bin/activate" evac_sim
 python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 
 mpirun $NQSV_MPIOPTS -np 76 \
@@ -30,5 +30,6 @@ mpirun $NQSV_MPIOPTS -np 76 \
   --stage pilot \
   --M-convergence-candidates 128,256,512 \
   --resume \
+  --no-figures \
   --max-runtime-seconds 53400 \
   --output-dir results/runs/phase5_B2_R12_pilot

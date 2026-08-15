@@ -13,7 +13,7 @@ set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
 module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_env
+source "$HOME/miniforge3/bin/activate" evac_sim
 python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
 
 SCALING_ROOT=results/runs/phase5_scaling_benchmark
@@ -35,6 +35,7 @@ for MPI_RANKS in 19 38 57 76; do
     --bootstrap-replicates 20 \
     --stage benchmark \
     --no-resume \
+    --no-figures \
     --output-dir "$OUTPUT_DIR"
 done
 
