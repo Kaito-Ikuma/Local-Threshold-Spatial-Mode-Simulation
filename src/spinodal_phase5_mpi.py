@@ -294,12 +294,17 @@ def environment_payload() -> dict[str, Any]:
     mpi_library = MPI.Get_library_version() if MPI is not None else None
     return {
         "sys_executable": sys.executable,
+        "python_executable": sys.executable,
+        "python_executable_realpath": os.path.realpath(sys.executable),
+        "python_prefix": sys.prefix,
         "python_version": platform.python_version(),
         "numpy_version": np.__version__,
         "mpi4py_available": MPI is not None,
         "mpi_library_version": mpi_library,
         "hostname": socket.gethostname(),
         "mpi_world_size": WORLD_SIZE,
+        "phase5_venv": os.environ.get("PHASE5_VENV"),
+        "phase5_python_requested": os.environ.get("PHASE5_PY"),
         "allocated_cores_detected": _allocated_cores(),
         "thread_environment": {
             name: os.environ.get(name)

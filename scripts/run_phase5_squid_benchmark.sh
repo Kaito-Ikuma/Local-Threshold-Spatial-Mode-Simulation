@@ -12,12 +12,11 @@
 set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
-module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_sim
-python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
+source scripts/phase5_squid_env.sh
+source scripts/phase5_squid_preflight.sh
 
-mpirun $NQSV_MPIOPTS -np 1 \
-  python src/spinodal_phase5_mpi.py \
+mpirun ${NQSV_MPIOPTS} -np 1 \
+  "$PHASE5_PY" src/spinodal_phase5_mpi.py \
   --N 1024 \
   --deltas 1e-3 \
   --modes 0 \

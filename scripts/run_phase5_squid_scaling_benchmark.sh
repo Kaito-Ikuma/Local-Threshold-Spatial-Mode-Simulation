@@ -12,16 +12,15 @@
 set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
-module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_sim
-python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
+source scripts/phase5_squid_env.sh
+source scripts/phase5_squid_preflight.sh
 
 SCALING_ROOT=results/runs/phase5_scaling_benchmark
 mkdir -p "$SCALING_ROOT"
 for MPI_RANKS in 19 38 57 76; do
   OUTPUT_DIR="$SCALING_ROOT/np_$MPI_RANKS"
-  mpirun $NQSV_MPIOPTS -np "$MPI_RANKS" \
-    python src/spinodal_phase5_mpi.py \
+  mpirun ${NQSV_MPIOPTS} -np "$MPI_RANKS" \
+    "$PHASE5_PY" src/spinodal_phase5_mpi.py \
     --N 256 \
     --deltas 1e-3 \
     --modes 0,1 \
@@ -39,7 +38,7 @@ for MPI_RANKS in 19 38 57 76; do
     --output-dir "$OUTPUT_DIR"
 done
 
-python -c '
+"$PHASE5_PY" -c '
 import csv, json
 from pathlib import Path
 root=Path("results/runs/phase5_scaling_benchmark")

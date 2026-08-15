@@ -12,8 +12,11 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
+SCRIPTS_DIR = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SRC_DIR))
+sys.path.insert(0, str(SCRIPTS_DIR))
 
+from check_squid_mpi_env import validate_python_executable
 from spinodal_phase5_analysis import (
     aggregate_block_series,
     fit_microscopic_relaxation,
@@ -35,7 +38,7 @@ from spinodal_phase5_core import (
     save_block_checkpoint,
     simulate_microscopic_block,
 )
-from spinodal_phase5_mpi import weighted_lpt_assignment
+from spinodal_phase5_mpi import environment_payload, weighted_lpt_assignment
 
 
 class SpinodalPhase5Tests(unittest.TestCase):
@@ -329,6 +332,46 @@ with tempfile.TemporaryDirectory() as directory:
 assert not any(name == 'matplotlib' or name.startswith('matplotlib.') for name in sys.modules)
 """
         subprocess.run([sys.executable, "-c", code], check=True)
+
+    def test_15_expected_python_matching_path_passes(self) -> None:
+        actual, expected = validate_python_executable(sys.executable)
+        self.assertEqual(actual, expected)
+
+    def test_16_expected_python_mismatch_fails_clearly(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Python executable mismatch"):
+            validate_python_executable("/definitely/not/phase5/python")
+
+    def test_17_expected_python_symlink_uses_realpath(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "phase5-python"
+            link.symlink_to(Path(sys.executable))
+            actual, expected = validate_python_executable(str(link))
+        self.assertEqual(actual, expected)
+
+    def test_18_missing_phase5_python_fails_shell_helper(self) -> None:
+        helper = REPO_ROOT / "scripts/phase5_squid_env.sh"
+        command = (
+            "module() { return 0; }; "
+            "PHASE5_VENV=/definitely/not/phase5_venv; "
+            "PHASE5_PY=/definitely/not/phase5_venv/bin/python; "
+            f"source {str(helper)!r}"
+        )
+        completed = subprocess.run(
+            ["/bin/bash", "-c", command],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Phase5 Python is not executable", completed.stderr)
+
+    def test_19_environment_payload_records_python_and_mpi(self) -> None:
+        payload = environment_payload()
+        self.assertEqual(payload["python_executable"], sys.executable)
+        self.assertEqual(payload["python_prefix"], sys.prefix)
+        self.assertIn("python_version", payload)
+        self.assertIn("mpi_library_version", payload)
+        self.assertIn("mpi_world_size", payload)
 
 
 if __name__ == "__main__":

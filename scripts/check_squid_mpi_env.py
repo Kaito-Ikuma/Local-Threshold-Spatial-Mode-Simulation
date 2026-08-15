@@ -31,12 +31,36 @@ def detect_flavor(text: str) -> str:
     return "unknown"
 
 
+def validate_python_executable(
+    expected_python: str | None,
+    actual_python: str | None = None,
+) -> tuple[str, str | None]:
+    """Resolve both paths and reject an unexpected Python executable."""
+    actual_realpath = os.path.realpath(actual_python or sys.executable)
+    expected_realpath = (
+        os.path.realpath(os.path.expanduser(expected_python))
+        if expected_python
+        else None
+    )
+    if expected_realpath and actual_realpath != expected_realpath:
+        raise ValueError(
+            "Python executable mismatch: "
+            f"{actual_realpath!r} != {expected_realpath!r}."
+        )
+    return actual_realpath, expected_realpath
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--expected-flavor",
         choices=("openmpi", "intelmpi"),
         default=None,
+    )
+    parser.add_argument(
+        "--expected-python",
+        default=None,
+        help="required Python executable; compared with sys.executable by realpath",
     )
     args = parser.parse_args()
     mpirun = shutil.which("mpirun")
@@ -50,8 +74,18 @@ def main() -> None:
         )
         mpirun_version = (completed.stdout + completed.stderr).strip()
     library = MPI.Get_library_version() if MPI is not None else ""
+    try:
+        executable_realpath, expected_python_realpath = validate_python_executable(
+            args.expected_python
+        )
+    except ValueError as error:
+        raise SystemExit(f"ERROR: {error}") from error
     payload = {
         "sys_executable": sys.executable,
+        "sys_executable_realpath": executable_realpath,
+        "sys_prefix": sys.prefix,
+        "expected_python": args.expected_python,
+        "expected_python_realpath": expected_python_realpath,
         "python_version": platform.python_version(),
         "numpy_version": np.__version__,
         "mpi4py_version": mpi4py.__version__ if mpi4py is not None else None,

@@ -151,9 +151,107 @@ production既定の aggregated_exact は、現在のspin pairを固定した条�
 
 MPIはsite空間を分割しません。work unitは (delta, mode, epsilon, block ID) で、各rankはblockを最後まで独立実行します。rank0はestimated cost降順のLPT greedy assignmentを作り、time step中のallreduce、gather、halo exchangeは行いません。1 block完了ごとにblocksディレクトリへatomic checkpointを書き、同じcommandの --resume で有効なblockをskipします。15時間jobでは --max-runtime-seconds 53400 により新規block開始を早めに止め、再投入できます。
 
-### SQUIDでの実行手順
+### SQUID実行前の初回セットアップ
 
-以下のコマンドはすべてリポジトリのrootで実行します。SQUID側に `results/runs/phase0_B2_R12` と `results/runs/phase12_B2_R12` が必要です。`results/runs/` はGit管理対象外なので、ローカルで作成した場合はSQUIDへ別途転送するか、先にPhase0とPhase1・2をSQUID上で実行してください。
+Phase5 SQUID runs do not depend on the old `evac_sim` Conda environment. 過去の実地形simulationと分離し、次の専用venvのPythonをactivateせず絶対パスで実行します。
+
+```bash
+module purge
+module load BasePy/2026
+module load BaseCPU/2026
+
+export PHASE5_VENV=/sqfs/work/cm9029/$USER/phase5_venv
+export PHASE5_PY="$PHASE5_VENV/bin/python"
+python3 -m venv "$PHASE5_VENV"
+"$PHASE5_PY" --version
+```
+
+`BasePy/2026` はvenv Pythonが必要とするPython 3.13 runtime、`BaseCPU/2026` はIntel compiler / Intel MPIを供給します。必要なpackageは計算job内ではなく、外部networkに接続できるSQUIDフロントエンドで事前にinstallします。
+
+```bash
+cd /path/to/Local-Threshold-Spatial-Mode-Simulation
+"$PHASE5_PY" -m pip install --upgrade pip setuptools wheel
+"$PHASE5_PY" -m pip install -r requirements.txt
+```
+
+Intel MPIに対して `mpi4py` をsource buildする場合は次を実行します。すでに後述のserial / 2-rank checkが通る場合は再install不要です。
+
+```bash
+which mpicc
+which mpirun
+mpirun --version
+
+MPI4PY_BUILD_MPICC="$(which mpicc)" \
+"$PHASE5_PY" -m pip install \
+  --no-cache-dir \
+  --no-binary=mpi4py \
+  mpi4py
+```
+
+### 各ログイン後の環境確認
+
+以下のコマンドはリポジトリのrootで実行します。共通helperがmoduleとvenvの既定値を設定し、Python共有library、package、Intel MPI、Python絶対パスを検査します。
+
+```bash
+cd /path/to/Local-Threshold-Spatial-Mode-Simulation
+source scripts/phase5_squid_env.sh
+source scripts/phase5_squid_preflight.sh
+```
+
+手動のserial import checkは次のとおりです。`Python:` は `/sqfs/work/cm9029/<user>/phase5_venv/bin/python` を指し、MPI libraryはIntel MPIでなければなりません。
+
+```bash
+"$PHASE5_PY" -c '
+import sys
+import numpy
+import scipy
+import pandas
+import mpi4py
+from mpi4py import MPI
+
+print("Python:", sys.executable)
+print("NumPy:", numpy.__version__)
+print("SciPy:", scipy.__version__)
+print("pandas:", pandas.__version__)
+print("mpi4py:", mpi4py.__version__)
+print("MPI:")
+print(MPI.Get_library_version())
+'
+
+"$PHASE5_PY" scripts/check_squid_mpi_env.py \
+  --expected-flavor intelmpi \
+  --expected-python "$PHASE5_PY"
+```
+
+本計算前の2-rank Python-path確認は必須です。次のhelperをフロントエンドで実行するか、2 coreのPBS smoke jobを投入します。
+
+```bash
+MPI_TEST_RANKS=2 scripts/check_phase5_mpi_python.sh
+
+# または計算ノードで確認
+qsub scripts/run_phase5_squid_env_smoke.sh
+qstat
+```
+
+内部で実行するコマンドは次と同義です。
+
+```bash
+mpirun ${NQSV_MPIOPTS:-} -np 2 "$PHASE5_PY" -c '
+from mpi4py import MPI
+import socket
+import sys
+
+print(
+    "rank=", MPI.COMM_WORLD.Get_rank(),
+    "host=", socket.gethostname(),
+    "python=", sys.executable,
+)
+'
+```
+
+両rankの `python=` がどちらも `/sqfs/work/cm9029/<user>/phase5_venv/bin/python` なら成功です。rankごとに異なるPython、system Python、Conda Pythonが表示された場合はbenchmarkへ進んではいけません。
+
+SQUID側に `results/runs/phase0_B2_R12` と `results/runs/phase12_B2_R12` も必要です。`results/runs/` はGit管理対象外なので、ローカルで作成した場合はSQUIDへ別途転送してください。
 
 ```bash
 test -f results/runs/phase0_B2_R12/phase0_summary.json
@@ -162,39 +260,15 @@ test -f results/runs/phase12_B2_R12/phase12_mode_results.csv
 test -f results/runs/phase12_B2_R12/phase12_dispersion_fits.csv
 ```
 
+### benchmark → pilot → production
+
 #### Step 1: local unit tests
 
-まずMacまたはローカル開発環境で全Phaseのtestを実行します。
-
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
 python3 -m unittest discover -s tests -v
 ```
 
-最後に `OK` と表示されることを確認してください。MPI実行もローカルで試す場合は、利用中のMPI implementationを用意したうえで `python3 -m pip install -r requirements-mpi.txt` も実行します。
-
-#### Step 2: SQUID BaseCPU / Intel MPI environment check
-
-Phase5のSQUID実行は `BaseCPU` とIntel MPIに統一しています。SQUIDへloginし、`BaseCPU` をloadしてから計算に使う `evac_sim` をactivateします。
-
-```bash
-cd /path/to/Local-Threshold-Spatial-Mode-Simulation
-module load BaseCPU
-source "$HOME/miniforge3/bin/activate" evac_sim
-which python
-which mpirun
-mpirun --version
-python -c 'from mpi4py import MPI; print(MPI.Get_library_version())'
-python scripts/check_squid_mpi_env.py --expected-flavor intelmpi
-```
-
-checkerがexit code 0で終了し、`mpi_library_flavor` と `mpirun_flavor` がどちらも `intelmpi` になることを確認します。不一致な場合はjobを投入せず、`BaseCPU` が提供するIntel MPIを使って `mpi4py` をbuildし直してください。benchmark、scaling、pilot、productionの全PBS scriptは `#PBS -T intmpi`、`module load BaseCPU`、`--expected-flavor intelmpi` を使用します。
-
-SQUIDの全PBS scriptは `--no-figures` を指定します。このモードでは `matplotlib` をimportせず、checkpoint、CSV、JSONのみを生成するため、`evac_sim` に `matplotlib` は不要です。PNG図はSQUID出力をローカルへ転送し、`matplotlib` が入った環境で同じ物理オプションと `--resume --figures --max-runtime-seconds 0` を指定して生成します。`0`秒制限により、設定が一致せずcheckpointを再利用できない場合もローカルで大規模simulationを開始しません。
-
-#### Step 3: kernel・block size・MPI scaling benchmark
+#### Step 2: kernel・block size・MPI scaling benchmark
 
 最初に1 coreで `direct_J` と `aggregated_exact`、block size 16/32/64/128を比較します。
 
@@ -206,7 +280,7 @@ qstat
 job終了後に結果を確認します。
 
 ```bash
-python -m json.tool \
+"$PHASE5_PY" -m json.tool \
   results/runs/phase5_B2_R12/benchmarks/phase5_kernel_benchmark.json
 cat results/runs/phase5_B2_R12/benchmarks/phase5_block_size_benchmark.csv
 ```
@@ -224,9 +298,9 @@ cat results/runs/phase5_scaling_benchmark/phase5_mpi_scaling_benchmark.csv
 
 `aggregated_exact` のthroughputが最も高く、メモリ使用量に余裕があるblock sizeを選びます。production rank数は、単に76を固定せず `trial_site_steps_per_sec` と `parallel_efficiency` の実測値から選んでください。
 
-#### Step 4: epsilon・M convergence pilot
+#### Step 3: epsilon・M convergence pilot
 
-Step 3で選んだblock sizeとrank数を [scripts/run_phase5_squid_pilot.sh](scripts/run_phase5_squid_pilot.sh) の `--block-size`と `-np` へ反映したうえでpilotを投入します。
+Step 2で選んだblock sizeとrank数を [scripts/run_phase5_squid_pilot.sh](scripts/run_phase5_squid_pilot.sh) の `--block-size`と `-np` へ反映したうえでpilotを投入します。
 
 ```bash
 qsub scripts/run_phase5_squid_pilot.sh
@@ -236,9 +310,9 @@ qstat
 15時間内に全blockが完了しなかった場合もcheckpointは残ります。同じscriptを再度 `qsub` すると `--resume` により未完了blockだけを続行します。完了後は次を確認します。
 
 ```bash
-python -m json.tool \
+"$PHASE5_PY" -m json.tool \
   results/runs/phase5_B2_R12_pilot/phase5_run_state.json
-python -m json.tool \
+"$PHASE5_PY" -m json.tool \
   results/runs/phase5_B2_R12_pilot/phase5_validation_summary.json
 cat results/runs/phase5_B2_R12_pilot/phase5_epsilon_convergence.csv
 cat results/runs/phase5_B2_R12_pilot/phase5_M_convergence.csv
@@ -246,7 +320,7 @@ cat results/runs/phase5_B2_R12_pilot/phase5_M_convergence.csv
 
 `all_complete=true`であること、epsilonを0.025/0.05/0.10と変えてもGammaが統計誤差内で安定すること、Mを増やしたときにGammaと誤差が収束することを確認します。加えて `escape_fraction`、`baseline_drift`、`preparation_drift`、fit-window dependenceを確認します。substantial escapeや `reliable=false` が残る場合はproductionへ進まず、preparation protocol、Delta範囲、M、Tを再検討してください。
 
-#### Step 5: production
+#### Step 4: production
 
 pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` を [scripts/run_phase5_squid_intelmpi.sh](scripts/run_phase5_squid_intelmpi.sh) へ反映し、Intel MPI版productionを投入します。
 
@@ -257,26 +331,63 @@ qsub scripts/run_phase5_squid_intelmpi.sh
 途中終了した場合は同じscriptを再投入します。全block完了後に以下を確認します。
 
 ```bash
-python -m json.tool results/runs/phase5_B2_R12/phase5_run_state.json
-python -m json.tool results/runs/phase5_B2_R12/phase5_validation_summary.json
+"$PHASE5_PY" -m json.tool results/runs/phase5_B2_R12/phase5_run_state.json
+"$PHASE5_PY" -m json.tool results/runs/phase5_B2_R12/phase5_validation_summary.json
 cat results/runs/phase5_B2_R12/phase5_mode_results.csv
 cat results/runs/phase5_B2_R12/phase5_dispersion_fits.csv
 ```
 
-2 nodeまたは4 nodeへ増やす場合は、1 nodeベンチマークで不足が確認できた場合に限ります。2 nodeなら `#PBS -b 2`、`#PBS -l cpunum_job=76`、`mpirun -np 152`、4 nodeなら `#PBS -b 4`、`#PBS -l cpunum_job=76`、`mpirun -np 304` とし、`WORLD_SIZE <= allocated cores` の起動時検査が通ることを確認してください。
+2 nodeまたは4 nodeへ増やす場合は、1 nodeベンチマークで不足が確認できた場合に限ります。2 nodeなら `#PBS -b 2`、`#PBS -l cpunum_job=76`、`mpirun -np 152`、4 nodeなら `#PBS -b 4`、`#PBS -l cpunum_job=76`、`mpirun -np 304` とします。どのrank数でもlauncherに同じ `"$PHASE5_PY"` を渡すため、Python pathはrank番号やnode数に依存しません。
 
-現行SQUID公式手順では汎用CPUノードは76並列/ノードです。Phase5ではPBS typeを `intmpi`、moduleを `BaseCPU`、起動形式を `mpirun ${NQSV_MPIOPTS}` に統一しています。環境変数を全nodeへ渡すためPBS `-v` でOMP、OpenBLAS、MKL、NumExprを1 threadに固定します。詳細は大阪大学D3センターの[Intel MPI手順](https://www.hpc.cmc.osaka-u.ac.jp/en/system/manual/squid-use/cpu-intelmpi-hybrid/)を参照してください。
+SQUIDの全PBS scriptは `--no-figures` を指定し、`matplotlib` をimportせずcheckpoint、CSV、JSONのみを生成します。PNG図はSQUID出力をローカルへ転送し、同じ物理オプションと `--resume --figures --max-runtime-seconds 0` で後から生成できます。
+
+### Troubleshooting
+
+`phase5_venv/bin/python: error while loading shared libraries: libpython3.13.so.1.0: cannot open shared object file` は、`mpi4py` より前にPython interpreter自身が起動できていない状態です。`mpi4py` を再installする問題ではありません。
+
+```bash
+module purge
+module load BasePy/2026
+module load BaseCPU/2026
+ldd "$PHASE5_VENV/bin/python" | grep -E "python|not found"
+"$PHASE5_PY" --version
+```
+
+`libpython3.13.so.1.0 => not found` と表示される場合は、`BasePy/2026` がloadされているか、venv作成時と実行時のPython moduleが同じかを確認してください。
+
+現行の2026年度SQUID環境ではPython 3.13.5に `BasePy/2026`、Intel oneAPI 2023.2 / Intel MPI 2021.11に `BaseCPU/2026` を使用します。詳細は大阪大学D3センターの[2026年度software update](https://www.hpc.cmc.osaka-u.ac.jp/maintenance/20260420/)、[Python手順](https://www.hpc.cmc.osaka-u.ac.jp/system/manual/squid-use/python/)、[Intel MPI手順](https://www.hpc.cmc.osaka-u.ac.jp/en/system/manual/squid-use/intelmpi-3/)を参照してください。
 
 主要script:
 
 - scripts/run_phase5_squid_benchmark.sh: single-core kernel/block-size benchmark
 - scripts/run_phase5_squid_scaling_benchmark.sh: 19/38/57/76 rank benchmark
 - scripts/run_phase5_squid_pilot.sh: 3 delta × 3 mode × 3 epsilon pilot
-- scripts/run_phase5_squid_intelmpi.sh: BaseCPU / Intel MPI production template
+- scripts/run_phase5_squid_intelmpi.sh: BasePy / BaseCPU / Intel MPI production template
+- scripts/run_phase5_squid_production.sh: production preflight / qsub案内wrapper
+- scripts/phase5_squid_env.sh: BasePy / BaseCPU / PHASE5_PY共通設定
+- scripts/phase5_squid_preflight.sh: Python package、MPI、PBS context検査
+- scripts/check_phase5_mpi_python.sh: rankごとのPython絶対パス検査
+- scripts/run_phase5_squid_env_smoke.sh: 2-rank preflight PBS job
 
 Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
 
 Phase5のprimary出力はphase5_mode_results.csv、phase5_dispersion_fits.csv、phase5_scaling_summary.csv、phase5_validation_summary.jsonです。pilotではphase5_epsilon_convergence.csvとphase5_M_convergence.csvも生成します。full structure factorは既定OFFで、代表debug条件に限り --save-structure-factor で保存できます。
+
+### SQUIDで毎回実行する最小手順
+
+```bash
+cd /path/to/Local-Threshold-Spatial-Mode-Simulation
+source scripts/phase5_squid_env.sh
+
+"$PHASE5_PY" scripts/check_squid_mpi_env.py \
+  --expected-flavor intelmpi \
+  --expected-python "$PHASE5_PY"
+
+MPI_TEST_RANKS=2 scripts/check_phase5_mpi_python.sh
+qsub scripts/run_phase5_squid_benchmark.sh
+```
+
+推奨順は、(1) 専用venv確認、(2) package import、(3) Intel MPI / `mpi4py`、(4) 2-rank Python path、(5) benchmark、(6) block size / scaling確認、(7) pilot、(8) epsilon / M convergence確認、(9) productionです。
 
 ## 実行例
 
