@@ -18,7 +18,11 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
-from spinodal_phase5_analysis import run_phase5_analysis, write_phase5_analysis
+from spinodal_phase5_analysis import (
+    kernel_hat,
+    run_phase5_analysis,
+    write_phase5_analysis,
+)
 from spinodal_phase5_core import (
     SCRIPT_VERSION,
     Phase5Task,
@@ -30,6 +34,7 @@ from spinodal_phase5_core import (
     save_block_checkpoint,
     simulate_microscopic_block,
 )
+from spinodal_phase5_pseudospinodal_mpi import gaussian_theory_points
 
 try:
     from mpi4py import MPI
@@ -179,6 +184,116 @@ def load_phase5_references(
         if missing_columns:
             raise ValueError(f"{name} is missing columns: {sorted(missing_columns)}")
     return summary, phase0, mode, dispersion
+
+
+def build_analytic_phase5_references(
+    *,
+    deltas: Sequence[float],
+    modes: Sequence[int],
+    N: int,
+    B: float,
+    R: int,
+    sigma_J: float,
+    sigma_phi: float,
+    phi_bar: float,
+    lattice_spacing: float,
+    branch: str,
+    qR_max_fit: float,
+) -> tuple[dict[str, Any], pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build Phase0/12-equivalent references without plotting imports or files."""
+    points = gaussian_theory_points(
+        deltas,
+        B=B,
+        R=R,
+        sigma_J=sigma_J,
+        sigma_phi=sigma_phi,
+        branch=branch,
+    )
+    kappa_R = lattice_spacing**2 * (R + 1) * (2 * R + 1) / 12.0
+    summary = {
+        "calculation_type": "in-memory analytic Gaussian reference for Phase5",
+        "mu": points[0].mu,
+        "sigma_eff": points[0].sigma_eff,
+        "m_spinodal": points[0].m_spinodal,
+        "Delta_spinodal": points[0].Delta_spinodal,
+        "kappa_R_theory": kappa_R,
+        "inputs": {
+            "B": B,
+            "R": R,
+            "sigma_J": sigma_J,
+            "sigma_phi": sigma_phi,
+            "phi_bar": phi_bar,
+            "a": lattice_spacing,
+            "branch": branch,
+            "delta_list": list(deltas),
+        },
+    }
+    phase0_rows = []
+    mode_rows = []
+    dispersion_rows = []
+    for point in points:
+        phase0_rows.append(
+            {
+                "delta": point.delta,
+                "Delta": point.Delta,
+                "m_star": point.m_star,
+                "Lambda_star": point.Lambda_star,
+                "Gamma0_theory": point.Gamma_closure,
+                "tau0_theory": 1.0 / point.Gamma_closure,
+                "kappa_R_theory": kappa_R,
+                "xi_theory": math.sqrt(kappa_R / point.Gamma_closure),
+            }
+        )
+        eligible_q2 = []
+        eligible_gamma = []
+        for mode_index in modes:
+            q = 2.0 * math.pi * int(mode_index) / (N * lattice_spacing)
+            khat = kernel_hat(int(mode_index), N, R)
+            lambda_q = point.Lambda_star * khat
+            reliable = math.isfinite(lambda_q) and 0.0 < abs(lambda_q) < 1.0
+            gamma_q = -math.log(abs(lambda_q)) if reliable else math.nan
+            mode_rows.append(
+                {
+                    "task_group": "main",
+                    "delta": point.delta,
+                    "mode_index": int(mode_index),
+                    "q": q,
+                    "qR": q * R * lattice_spacing,
+                    "kernel_hat": khat,
+                    "Gamma_from_lambda": gamma_q,
+                    "reliable": reliable,
+                }
+            )
+            if reliable and q * R * lattice_spacing <= qR_max_fit:
+                eligible_q2.append(q * q)
+                eligible_gamma.append(gamma_q)
+        if len(eligible_q2) < 2 or max(eligible_q2) <= min(eligible_q2):
+            raise ValueError(
+                "analytic reference dispersion needs at least two eligible modes "
+                f"for delta={point.delta:g}"
+            )
+        design = np.column_stack(
+            (np.ones(len(eligible_q2), dtype=float), np.asarray(eligible_q2))
+        )
+        beta, _, _, _ = np.linalg.lstsq(
+            design, np.asarray(eligible_gamma, dtype=float), rcond=None
+        )
+        dispersion_rows.append(
+            {
+                "delta": point.delta,
+                "D_fit": float(beta[1]),
+                "Gamma0_dispersion_fit": float(beta[0]),
+                "kappa_R_theory": kappa_R,
+                "n_modes_used": len(eligible_q2),
+                "qR_max_fit": qR_max_fit,
+            }
+        )
+    return (
+        summary,
+        pd.DataFrame(phase0_rows),
+        pd.DataFrame(mode_rows),
+        pd.DataFrame(dispersion_rows),
+    )
 
 
 def build_phase5_tasks(
@@ -396,6 +511,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--phase12-dir", type=Path, default=PROJECT_ROOT / "results/runs/phase12_B2_R12")
     parser.add_argument("--phase34-dir", type=Path, default=PROJECT_ROOT / "results/runs/phase34_B2_R12")
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "results/runs/phase5_B2_R12")
+    parser.add_argument(
+        "--analytic-references",
+        action="store_true",
+        help="generate arbitrary-delta Gaussian Phase0/12 references in memory",
+    )
+    parser.add_argument("--B", type=float, default=2.0)
+    parser.add_argument("--R", type=int, default=12)
+    parser.add_argument("--sigma-J", type=float, default=1.0, dest="sigma_J")
+    parser.add_argument("--sigma-phi", type=float, default=0.06, dest="sigma_phi")
+    parser.add_argument("--phi-bar", type=float, default=0.0, dest="phi_bar")
+    parser.add_argument("--a", type=float, default=1.0, dest="lattice_spacing")
+    parser.add_argument(
+        "--branch",
+        choices=("stay_to_evacuate", "evacuate_to_stay"),
+        default="stay_to_evacuate",
+    )
     parser.add_argument("--stage", choices=("benchmark", "pilot", "production"), default="production")
     parser.add_argument("--N", type=int, default=1024)
     parser.add_argument("--deltas", type=parse_float_list, default=DEFAULT_DELTAS)
@@ -452,9 +583,26 @@ def main() -> None:
     root_payload = None
     if IS_ROOT:
         try:
-            summary, phase0, closure_mode, closure_dispersion = load_phase5_references(
-                args.phase0_dir, args.phase12_dir
-            )
+            if args.analytic_references:
+                summary, phase0, closure_mode, closure_dispersion = (
+                    build_analytic_phase5_references(
+                        deltas=args.deltas,
+                        modes=args.modes,
+                        N=args.N,
+                        B=args.B,
+                        R=args.R,
+                        sigma_J=args.sigma_J,
+                        sigma_phi=args.sigma_phi,
+                        phi_bar=args.phi_bar,
+                        lattice_spacing=args.lattice_spacing,
+                        branch=args.branch,
+                        qR_max_fit=args.qR_max_fit,
+                    )
+                )
+            else:
+                summary, phase0, closure_mode, closure_dispersion = (
+                    load_phase5_references(args.phase0_dir, args.phase12_dir)
+                )
             epsilon_fractions = (
                 tuple(args.epsilon_fractions)
                 if args.epsilon_fractions

@@ -340,6 +340,32 @@ cat results/runs/phase5_pseudospinodal_direct_J/phase5_pseudospinodal_scan.csv
 
 `preparation_survives=true` は準備直後の `escape_t0<=0.1` を意味します。初めてfalseからtrueへ変わるdelta区間をmicroscopic pseudospinodalの追加診断範囲とし、この結果だけからtrue spinodalとは呼びません。
 
+##### shifted-delta epsilon/M convergence pilot
+
+50-step survival診断で `delta=0.060` と `0.065` の間に10% escape境界が見つかった後は、次のscriptをそのまま投入します。このscriptは標準Phase0/12 CSVにないdeltaのGaussian referenceをmemory上で生成するため、追加の前処理やMatplotlibは必要ありません。
+
+```bash
+cd /path/to/Local-Threshold-Spatial-Mode-Simulation
+source scripts/phase5_squid_env.sh
+qsub scripts/run_phase5_squid_shifted_pilot.sh
+qstat
+```
+
+固定条件は `delta=0.060,0.065,0.070,0.080`、mode `0,1,4`、epsilon fraction `0.025,0.05,0.10`、`M=512`、`block-size=32`、`T=50`、fit window `0:10`、`aggregated_exact`、57 MPI ranksです。`delta=0.060` はbreakdown control、それ以外は生存側の候補です。
+
+```bash
+"$PHASE5_PY" -m json.tool \
+  results/runs/phase5_B2_R12_shifted_pilot/phase5_run_state.json
+"$PHASE5_PY" -m json.tool \
+  results/runs/phase5_B2_R12_shifted_pilot/phase5_validation_summary.json
+cat results/runs/phase5_B2_R12_shifted_pilot/phase5_epsilon_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_pilot/phase5_M_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_pilot/phase5_mode_results.csv
+cat results/runs/phase5_B2_R12_shifted_pilot/phase5_dispersion_fits.csv
+```
+
+`delta>=0.065` のprimary epsilonで `reliable=true`、全時刻の `escape_fraction<=0.1`、epsilon/Mに対するGammaの安定を確認してから次へ進みます。`--analytic-references` は同じPhase0式とtop-hat kernelからreferenceを作り、標準Phase0/12出力は変更しません。
+
 #### Step 4: production
 
 pilot結果から決めた `--block-size`、`--M-total`、`--epsilon-fraction`、`-np`、`--T-fixed` または `--tau-multiplier` を [scripts/run_phase5_squid_intelmpi.sh](scripts/run_phase5_squid_intelmpi.sh) へ反映し、Intel MPI版productionを投入します。
@@ -389,6 +415,7 @@ ldd "$PHASE5_VENV/bin/python" | grep -E "python|not found"
 - scripts/check_phase5_mpi_python.sh: rankごとのPython絶対パス検査
 - scripts/run_phase5_squid_env_smoke.sh: 2-rank preflight PBS job
 - scripts/run_phase5_squid_pseudospinodal_direct_j.sh: 1-rank direct_J preparation-survival scan
+- scripts/run_phase5_squid_shifted_pilot.sh: shifted-delta epsilon/M convergence pilot
 
 Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
 

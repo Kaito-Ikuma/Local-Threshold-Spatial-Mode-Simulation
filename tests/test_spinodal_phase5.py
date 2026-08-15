@@ -38,7 +38,11 @@ from spinodal_phase5_core import (
     save_block_checkpoint,
     simulate_microscopic_block,
 )
-from spinodal_phase5_mpi import environment_payload, weighted_lpt_assignment
+from spinodal_phase5_mpi import (
+    build_analytic_phase5_references,
+    environment_payload,
+    weighted_lpt_assignment,
+)
 
 
 class SpinodalPhase5Tests(unittest.TestCase):
@@ -372,6 +376,27 @@ assert not any(name == 'matplotlib' or name.startswith('matplotlib.') for name i
         self.assertIn("python_version", payload)
         self.assertIn("mpi_library_version", payload)
         self.assertIn("mpi_world_size", payload)
+
+    def test_20_analytic_references_match_phase0_and_cover_modes(self) -> None:
+        summary, phase0, modes, dispersion = build_analytic_phase5_references(
+            deltas=(0.06, 0.08),
+            modes=(0, 1, 4),
+            N=1024,
+            B=2.0,
+            R=12,
+            sigma_J=1.0,
+            sigma_phi=0.06,
+            phi_bar=0.0,
+            lattice_spacing=1.0,
+            branch="stay_to_evacuate",
+            qR_max_fit=0.35,
+        )
+        self.assertAlmostEqual(summary["mu"], 0.5333093426005172, places=14)
+        self.assertEqual(len(phase0), 2)
+        self.assertEqual(len(modes), 6)
+        self.assertTrue(modes["reliable"].all())
+        self.assertEqual(len(dispersion), 2)
+        self.assertTrue(np.all(np.isfinite(dispersion["D_fit"])))
 
 
 if __name__ == "__main__":
