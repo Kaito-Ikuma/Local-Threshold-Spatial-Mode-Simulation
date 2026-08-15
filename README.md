@@ -73,6 +73,47 @@ Phase0のテスト:
 python3 -m unittest discover -s tests -v
 ```
 
+## Spinodal Phase1-2
+
+Phase1は `q=0` の一様モード、Phase2は `q!=0` の有限波数モードについて、Phase0で得た準安定固定点と理論値を入力として緩和率 `Gamma(q)=-ln|lambda(q)|` を測定します。Phase2では厳密関係
+
+```text
+Gamma(q) - Gamma(0) = -ln|K_hat_R(q)|
+```
+
+を確認した後、低波数点だけで `Gamma(q)=Gamma0+Dq^2` をfitします。
+
+ここで使う `deterministic_closure` は連続値 `u_i` を平均場写像で同期更新する決定論的計算です。二値状態を確率的に再サンプリングする既存の `dynamics="gaussian_map"` とは別実装であり、既存モードの名前・意味・出力は変更していません。
+
+serial実行:
+
+```bash
+python3 src/spinodal_phase12_mpi.py \
+  --phase0-dir results/runs/phase0_B2_R12 \
+  --N 1024 \
+  --modes 0,1,2,3,4,5,6 \
+  --output-dir results/runs/phase12_B2_R12_serial
+```
+
+4-core MPI実行:
+
+```bash
+./scripts/run_spinodal_phase12_mpi_4cores.sh
+```
+
+MPIは空間を分割せず、独立な `(delta, mode, epsilon_fraction)` taskをrank間でround-robin分配します。`mpi4py` がない環境では同じdriverがserial fallbackで動作します。`--epsilon-fraction-scan 0.10,0.05,0.025` を指定すると、代表delta・modeに対するepsilon収束確認も実行します。
+
+主な出力:
+
+- `phase12_mode_results.csv`: 各 `(delta, mode)` の3種類のfit、理論値、信頼性診断
+- `phase12_dispersion_fits.csv`: `Gamma0` 切片、`D_fit`、標準誤差、`kappa_R`との差
+- `phase12_kernel_relation.csv`: 厳密kernel関係の誤差
+- `phase12_validation_summary.json`: Phase1・2の自動sanity checkと実行情報
+- `timeseries/`: 全site profileを含まないcompactな `A_q(t)` 時系列
+- `phase1_*.png`, `phase2_*.png`: 一様緩和、分散、kernel関係、`D_fit` の確認図
+
+Phase1・2は後続解析用データの確立までを担当し、Phase3・4の臨界指数fitやdata collapseは含みません。
+
 ## 実行例
 
 軽量な動作確認:
@@ -111,6 +152,8 @@ python3 scripts/replot_lambda_summary_vertical.py \
 
 - `src/spatial_mode_ensemble_validation.py`: 単一条件でのアンサンブル検証
 - `src/spinodal_phase0.py`: スピノーダルと後続Phase用理論スケールの計算
+- `src/spinodal_phase12.py`: 決定論的closureの数値コアとPhase1・2解析
+- `src/spinodal_phase12_mpi.py`: serial/MPI task sweep driver
 - `src/spatial_mode_presentation_materials_sweeps_v2.py`: 複数 seed・パラメータスイープ
 - `src/spatial_mode_presentation_materials_sweeps_mpi.py`: MPI 並列版
 - `scripts/replot_*.py`: 保存済み CSV から図を再作成

@@ -2,7 +2,7 @@
   "script_version": "2026.08.03-sweeps-mpi-v1",
   "mpi_world_size": 4,
   "mpi_active": true,
-  "base_script": "/Users/ikuma_kaito/Documents/大阪大学関係/2026年_前期/研究/シミュレーション/local_threshold/spatial_mode_ensemble_validation.py",
+  "base_script": "/Users/ikuma_kaito/Documents/大阪大学関係/2026年_前期/研究/シミュレーション/local_threshold/src/spatial_mode_ensemble_validation.py",
   "matched_config": {
     "N": 96,
     "R": 12,
