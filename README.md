@@ -386,7 +386,7 @@ M=8192 shifted runの次は、Gaussian closureへ結果を合わせるのでは�
   --bootstrap-replicates 1000
 ```
 
-ローカル転送時に `results/runs/runs/` となっている場合は `--input-dir` だけをその実在パスへ変更します。出力は `phase5_gamma_eff.csv` と `phase5_fit_window_extended.csv` です。fixed windows `0:3,0:5,1:3,1:5,2:5,2:7,3:7` をすべて保存し、closureに近いwindowを自動選択しません。plateau判定もprimary `0:3` を置き換えません。
+`--input-dir` には `results/runs/` 直下の実在ディレクトリを指定します。出力は `phase5_gamma_eff.csv` と `phase5_fit_window_extended.csv` です。fixed windows `0:3,0:5,1:3,1:5,2:5,2:7,3:7` をすべて保存し、closureに近いwindowを自動選択しません。plateau判定もprimary `0:3` を置き換えません。
 
 ##### Step B: preparation dependence
 
