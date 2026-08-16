@@ -10,24 +10,38 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from spinodal_gaussian_R_sweep import (
-    DEFAULT_R_VALUES,
-    build_R_N_mapping,
-    parse_number_list,
-)
 from spinodal_phase5_followup_analysis import interpolate_escape_crossing
 
 
 SCRIPT_VERSION = "2026.08.16-R-sweep-analysis-v1"
+DEFAULT_R_VALUES = (6, 12, 24, 48)
 DEFAULT_FIXED_DELTAS = (0.08, 0.10, 0.12)
 DEFAULT_MATCHED_OFFSETS = (0.005, 0.010, 0.020)
+
+
+def parse_number_list(text: str, value_type: type = float) -> tuple[Any, ...]:
+    try:
+        values = tuple(value_type(token.strip()) for token in text.split(",") if token.strip())
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected a comma-separated number list") from exc
+    if not values:
+        raise argparse.ArgumentTypeError("list must not be empty")
+    return values
+
+
+def build_R_N_mapping(
+    R_values: Sequence[int], *, reference_R: int = 12, reference_N: int = 1024
+) -> dict[int, int]:
+    ranges = tuple(int(value) for value in R_values)
+    if not ranges or len(set(ranges)) != len(ranges):
+        raise ValueError("R values must be non-empty and unique")
+    mapping = {R: int(round(reference_N * R / reference_R)) for R in ranges}
+    if any(N <= 2 * R for R, N in mapping.items()):
+        raise ValueError("mapped lattice size must exceed 2R")
+    return mapping
 
 
 def _json_safe(value: Any) -> Any:
@@ -413,6 +427,15 @@ def _first_or_nan(frame: pd.DataFrame, column: str) -> float:
     return float(frame[column].iloc[0]) if not frame.empty else math.nan
 
 
+def _run_state_is_complete(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    state = json.loads(path.read_text(encoding="utf-8"))
+    return bool(state.get("all_complete")) and int(
+        state.get("completed_valid_blocks", -1)
+    ) == int(state.get("total_blocks", -2))
+
+
 def build_combined_summary(
     gaussian: pd.DataFrame,
     pseudo: pd.DataFrame,
@@ -480,6 +503,8 @@ def build_combined_summary(
 
 
 def _empty_figure(path: Path, title: str) -> None:
+    import matplotlib.pyplot as plt
+
     fig, ax = plt.subplots(figsize=(6.4, 4.4))
     ax.text(0.5, 0.5, "SQUID data not available", ha="center", va="center")
     ax.set_title(title)
@@ -492,6 +517,11 @@ def _empty_figure(path: Path, title: str) -> None:
 def make_micro_figures(
     pseudo: pd.DataFrame, responses: pd.DataFrame, dispersion: pd.DataFrame, output_dir: Path
 ) -> list[Path]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     paths = [
         output_dir / "micro_R_gamma_ratio.png",
         output_dir / "micro_R_gamma_ratio_matched.png",
@@ -601,11 +631,56 @@ def analyze_command(args: argparse.Namespace) -> list[Path]:
     benchmarks.to_csv(benchmark_path, index=False)
     combined.to_csv(combined_path, index=False)
     figure_paths = make_micro_figures(pseudo, responses, dispersion, args.output_dir)
-    missing_stages = []
-    if len(benchmarks) < len(R_values): missing_stages.append("M1 benchmark")
-    if len(pseudo) < len(R_values): missing_stages.append("M3 fine pseudospinodal")
-    if responses.empty: missing_stages.append("M4/M5 response")
-    if dispersion.empty: missing_stages.append("M6 dispersion")
+    required_R = set(R_values)
+    observed_benchmark_R = set(benchmarks["R"].astype(int)) if not benchmarks.empty else set()
+    observed_pseudo_R = {
+        R
+        for R in (set(pseudo["R"].astype(int)) if not pseudo.empty else set())
+        if _run_state_is_complete(args.micro_root / f"R{R:03d}/pseudospinodal_fine/phase5_run_state.json")
+    }
+    observed_dispersion_R = {
+        R
+        for R in (set(dispersion["R"].astype(int)) if not dispersion.empty else set())
+        if _run_state_is_complete(args.micro_root / f"R{R:03d}/dispersion/phase5_run_state.json")
+    }
+    required_response = {
+        (R, coordinate)
+        for R in R_values
+        for coordinate in ("fixed_gaussian_delta", "operational_pseudospinodal_matched")
+    }
+    response_from_tables = (
+        set(zip(responses["R"].astype(int), responses["coordinate"].astype(str)))
+        if not responses.empty
+        else set()
+    )
+    response_directory = {
+        "fixed_gaussian_delta": "response_fixed_delta",
+        "operational_pseudospinodal_matched": "response_matched",
+    }
+    observed_response = {
+        (R, coordinate)
+        for R, coordinate in response_from_tables
+        if _run_state_is_complete(
+            args.micro_root
+            / f"R{R:03d}"
+            / response_directory[coordinate]
+            / "phase5_run_state.json"
+        )
+    }
+    missing_conditions = {
+        "M1_benchmark_R": sorted(required_R - observed_benchmark_R),
+        "M3_pseudospinodal_R": sorted(required_R - observed_pseudo_R),
+        "M4_M5_response": [
+            {"R": R, "coordinate": coordinate}
+            for R, coordinate in sorted(required_response - observed_response)
+        ],
+        "M6_dispersion_R": sorted(required_R - observed_dispersion_R),
+    }
+    missing_stages = [
+        label
+        for label, values in missing_conditions.items()
+        if values
+    ]
     validation = {
         "script_version": SCRIPT_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -617,6 +692,7 @@ def analyze_command(args: argparse.Namespace) -> list[Path]:
         "rounding_diagnostic": "abs(delta_ps_T50 - delta_ps_T30)",
         "power_law_R_fit_primary": False,
         "missing_stages": missing_stages,
+        "missing_conditions": missing_conditions,
         "complete": not missing_stages,
     }
     validation_path.write_text(json.dumps(_json_safe(validation), indent=2) + "\n", encoding="utf-8")

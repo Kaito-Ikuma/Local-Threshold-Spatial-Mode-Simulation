@@ -24,7 +24,7 @@ import os
 import resource
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +130,7 @@ class Phase5BlockResult:
     microscopic_kernel: str
     initialization_mode: str
     task_fingerprint: str
+    resume_fingerprint: str
     wall_seconds: float
 
 
@@ -227,6 +228,49 @@ def task_fingerprint(task: Phase5Task) -> str:
         asdict(task), sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
+
+
+def resume_fingerprint(task: Phase5Task) -> str:
+    """Hash simulation physics while allowing append-only M_total extension.
+
+    ``M_total`` determines how many stable block IDs are requested, but it does
+    not alter any already existing block.  Keeping a second fingerprint that
+    excludes only this field lets a 32768-trial run grow to 65536 trials while
+    still rejecting changes to N, R, seed, preparation, or any other setting.
+    """
+    payload = asdict(task)
+    payload.pop("M_total")
+    serialized = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+_LEGACY_M_EXTENSION_CACHE: dict[tuple[str, str], int | None] = {}
+
+
+def legacy_M_extension_matches(
+    stored_fingerprint: str, expected_unit: Phase5WorkUnit
+) -> bool:
+    """Validate pre-resume-fingerprint blocks for append-only M extension.
+
+    Existing schema-v2 production blocks hash ``M_total`` but do not store the
+    full task payload.  Production M values are block-aligned, so testing the
+    lower block-aligned totals recovers the old fingerprint without relaxing
+    validation of any other task field.  The matched old total is cached per
+    logical task and must cover the block being loaded.
+    """
+    task = expected_unit.task
+    key = (stored_fingerprint, resume_fingerprint(task))
+    if key not in _LEGACY_M_EXTENSION_CACHE:
+        matched_M = None
+        for prior_M in range(task.block_size, task.M_total, task.block_size):
+            if task_fingerprint(replace(task, M_total=prior_M)) == stored_fingerprint:
+                matched_M = prior_M
+                break
+        _LEGACY_M_EXTENSION_CACHE[key] = matched_M
+    matched_M = _LEGACY_M_EXTENSION_CACHE[key]
+    return matched_M is not None and matched_M >= expected_unit.end_trial
 
 
 def legacy_task_fingerprint(task: Phase5Task) -> str:
@@ -749,6 +793,7 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         microscopic_kernel=task.microscopic_kernel,
         initialization_mode=task.initialization_mode,
         task_fingerprint=task_fingerprint(task),
+        resume_fingerprint=resume_fingerprint(task),
         wall_seconds=time.perf_counter() - start,
     )
 
@@ -882,7 +927,16 @@ def load_block_checkpoint(
             if not legacy_compatible:
                 raise ValueError("checkpoint task configuration mismatch")
         elif not fingerprint_matches:
-            raise ValueError("checkpoint task configuration mismatch")
+            stored_resume = metadata.get("resume_fingerprint")
+            append_compatible = (
+                not stored_resume
+                and schema_version == 2
+                and legacy_M_extension_matches(
+                    str(metadata.get("task_fingerprint", "")), expected_unit
+                )
+            )
+            if stored_resume != resume_fingerprint(expected_unit.task) and not append_compatible:
+                raise ValueError("checkpoint task configuration mismatch")
         expected_time_shape = (expected_unit.task.T + 1,)
         for name in (
             "A_q",
@@ -927,6 +981,7 @@ def load_block_checkpoint(
     metadata.setdefault("checkpoint_schema_version", 1)
     metadata.setdefault("survival_tracking_enabled", False)
     metadata.setdefault("survive_to_T_count", 0)
+    metadata.setdefault("resume_fingerprint", "")
     arrays.setdefault("escape_fraction_cumulative", np.empty(0, dtype=float))
     arrays.setdefault("survival_fraction_cumulative", np.empty(0, dtype=float))
     arrays.setdefault("survival_count", np.empty(0, dtype=np.int64))

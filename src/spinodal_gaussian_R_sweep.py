@@ -17,10 +17,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -349,6 +345,11 @@ def make_combined_figures(
     mode_table: pd.DataFrame,
     output_dir: Path,
 ) -> dict[str, Path]:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     paths: dict[str, Path] = {}
 
     def save(name: str) -> Path:

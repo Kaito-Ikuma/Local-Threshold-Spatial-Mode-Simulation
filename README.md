@@ -700,6 +700,122 @@ scripts/run_R_sweep_analysis_local.sh
 
 長波長relaxational dynamicsと今回のmicroscopic比較の背景は、R. J. Glauber, *J. Math. Phys.* **4**, 294 (1963), [DOI:10.1063/1.1703954](https://doi.org/10.1063/1.1703954)、P. C. Hohenberg and B. I. Halperin, *Rev. Mod. Phys.* **49**, 435 (1977), [DOI:10.1103/RevModPhys.49.435](https://doi.org/10.1103/RevModPhys.49.435)、H. Mori, S. Miyashita, and P. A. Rikvold, *Phys. Rev. E* **81**, 011135 (2010), [DOI:10.1103/PhysRevE.81.011135](https://doi.org/10.1103/PhysRevE.81.011135)、E. S. Loscar et al., *J. Chem. Phys.* **131**, 024120 (2009), [DOI:10.1063/1.3168404](https://doi.org/10.1063/1.3168404)を参照してください。finite-range transient nucleationの補助的背景としてJ. Schweiger, K. Barros, and W. Klein, *Phys. Rev. E* **75**, 031102 (2007)も参照します。
 
+## Phase5 R-sweep Final validation（V1–V5）
+
+Stage A の後に行う最終追加検証です。既存のGaussian closure、microscopic dynamics、`prepared_metastable`、burn=8、`fit-start=0`、`fit-end=3`、primary estimator、pseudospinodal判定は変更しません。SQUID側のスクリプトは専用venvの `PHASE5_PY` を使い、Matplotlibをimportしないcompute-only経路を通ります。シェルスクリプトを `python` で起動せず、以下のように `qsub` または直接実行してください。
+
+### V1: finite-size control
+
+中央サイズの R=12, N=1024 と R=24, N=2048 は既存R-sweep結果を再利用します。追加する4条件は R=12 の N=512,2048、および R=24 の N=1024,4096 です。
+
+まずunperturbed pseudospinodal coarse scan（M=2048）を実行します。
+
+```bash
+qsub -v PHASE5_FS_STAGE=coarse scripts/run_phase5_squid_finite_size_ps.sh
+qstat
+```
+
+終了後、`results/runs/phase5_R_sweep/finite_size/finite_size_fine_plan.csv` を確認します。`extension_required` の条件だけは、示された側へcoarse scanを追加します。例えば R=24, N=4096 だけに小さいdeltaを追加する場合は次の形です。
+
+```bash
+qsub -v PHASE5_FS_STAGE=coarse,PHASE5_FS_CASES=24:4096,PHASE5_FS_TAG=_extension1,PHASE5_FS_DELTAS=0.010:0.014:0.018 scripts/run_phase5_squid_finite_size_ps.sh
+```
+
+4つの新規条件がすべて `bracketed` になった後、fine scan（M=4096、delta間隔0.002以下）を実行します。2つの中央サイズは既存fine scanを使います。
+
+```bash
+qsub -v PHASE5_FS_STAGE=fine scripts/run_phase5_squid_finite_size_ps.sh
+```
+
+次に各サイズの `delta_ps(T=50)+0.010` でq=0 response（M=4096）を実行します。
+
+```bash
+qsub scripts/run_phase5_squid_finite_size_response.sh
+```
+
+`finite_size_response_escalation_plan.csv` で `needs_M8192=True` となった条件だけ、既存blockを保持したままM=8192へ追加します。例:
+
+```bash
+qsub -v PHASE5_FS_M=8192,PHASE5_FS_CASES=12:2048 scripts/run_phase5_squid_finite_size_response.sh
+```
+
+### V3: observation-time extension
+
+既存R=6,12のraw blockを読み、T=20,30,40,50ごとに判定区間を作ります。範囲が不足する場合だけ固定delta `min(delta)/1.25` を追加し、既存点のMが8192未満なら同じdeltaをM=8192へ増強します。
+
+```bash
+qsub scripts/run_phase5_squid_time_extension.sh
+```
+
+判定は `results/runs/phase5_R_sweep/observation_time_extension_plan.csv`、統合結果は `results/runs/phase5_final_validation/completed_pseudospinodal_time_dependence.csv` に保存されます。R=6の非単調性が残る場合も点の除外や判定規則の変更は行いません。
+
+### V2: high-precision microscopic D
+
+V3までのpseudospinodal tableを確認してから、R=12,24,48 の `delta_ps(T=50)+0.010`、mode 0–6をM=32768で実行します。
+
+```bash
+qsub scripts/run_phase5_squid_D_precision.sh
+```
+
+V2は既存M6の各 `Rxxx/dispersion/blocks` にappendし、M=8192のstable block IDを再利用します。`high_precision_D_over_kappa.csv` の `D_over_kappa_SE` が概ね0.20–0.25を超える場合に限り、対象RだけM=65536へ追加できます。M-totalだけを増やすと既存M=32768 checkpointも再利用します。
+
+```bash
+qsub -v PHASE5_D_M=65536,PHASE5_D_R_LIST=24 scripts/run_phase5_squid_D_precision.sh
+```
+
+M=65536への増強は自動ではありません。まずM=32768の不確かさを確認してから判断します。
+
+### V5: seed reproducibility
+
+既存seed=20260815に加え、R=12,48、q=0、M=8192についてseed=20260817,20260818を実行します。
+
+```bash
+qsub scripts/run_phase5_squid_seed_check.sh
+```
+
+seedごとに別directoryとtask prefixを使うため、checkpointの混線を避けられます。
+
+### V4: R=96 minimal extension
+
+R=96, N=8192ではfull dispersionを行いません。benchmark、pseudospinodal、matched q=0 responseだけを順に実行します。
+
+```bash
+qsub -v PHASE5_R96_STAGE=benchmark scripts/run_phase5_squid_R96.sh
+qsub -v PHASE5_R96_STAGE=coarse scripts/run_phase5_squid_R96.sh
+```
+
+`R096/fine_scan_plan.csv` が `extension_required` の場合は、`PHASE5_R96_TAG` とcolon区切りの `PHASE5_R96_DELTAS` を指定してcoarse点を追加します。bracket後にfineとresponseを実行します。
+
+```bash
+# planのextension_deltaが0.00333333333333だった場合
+qsub -v PHASE5_R96_STAGE=coarse,PHASE5_R96_TAG=_extension1,PHASE5_R96_DELTAS=0.00333333333333 scripts/run_phase5_squid_R96.sh
+
+# fine_scan_plan.csvがbracketedになった後
+qsub -v PHASE5_R96_STAGE=fine scripts/run_phase5_squid_R96.sh
+qsub -v PHASE5_R96_STAGE=response scripts/run_phase5_squid_R96.sh
+```
+
+benchmarkはblock-size 16,32,64だけを比較し、responseはq=0のみです。
+
+### V-A: final analysis and figures
+
+SQUIDの結果をローカルの同じpathへ転送した後に実行します。
+
+```bash
+scripts/run_phase5_final_validation_local.sh
+```
+
+主な出力は `results/runs/phase5_final_validation/` の次のファイルです。
+
+- `finite_size_pseudospinodal.csv`、`finite_size_response.csv`、`finite_size_response_escalation_plan.csv`
+- `high_precision_D_over_kappa.csv`（`needs_M65536` を含む）、`high_precision_D_validation_summary.json`
+- `completed_pseudospinodal_time_dependence.csv`、`observation_time_rounding.csv`
+- `R96_validation.csv`
+- `seed_reproducibility.csv`、`seed_reproducibility_summary.csv`
+- `phase5_final_validation_summary.json` と最終図
+
+`phase5_final_validation_summary.json` の `all_complete=true` は、必要な各run stateが `all_complete` であり、要求R・N・T・seedの条件が揃い、V3の判定端点がM=8192以上である場合だけ設定されます。不足は `missing_conditions` に明示され、欠けたRを黙って除外して図やsummaryを完成扱いにはしません。
+
 ## 実行例
 
 軽量な動作確認:
