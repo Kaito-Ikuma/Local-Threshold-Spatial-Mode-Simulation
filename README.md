@@ -512,6 +512,194 @@ qsub scripts/run_phase5_squid_benchmark.sh
 
 推奨順は、(1) 専用venv確認、(2) package import、(3) Intel MPI / `mpi4py`、(4) 2-rank Python path、(5) benchmark、(6) block size / scaling確認、(7) pilot、(8) epsilon / M convergence確認、(9) productionです。
 
+## Interaction-range R sweep
+
+これまでのSpinodal Phase0–4における正式なcritical scaling検証は `R=12, N=1024` のみです。各driverの既存 `--R` は単一runまたはfallback用の引数であり、複数Rを同一protocolで比較するsystematic R sweepを意味しません。本節の追加driverは既存R=12コード・出力を変更せず、`results/runs/gaussian_R_sweep/` と `results/runs/phase5_R_sweep/` に独立して保存します。
+
+primary rangeと格子サイズは次の対応です。将来 `R=96` を `--R-list` に追加できますが、今回のprimaryには含めません。
+
+| R | N | N/R |
+|---:|---:|---:|
+| 6 | 512 | 85.3333 |
+| 12 | 1024 | 85.3333 |
+| 24 | 2048 | 85.3333 |
+| 48 | 4096 | 85.3333 |
+
+一般式は `N(R)=round(N_ref R/R_ref)`、`R_ref=12`、`N_ref=1024` です。周期境界では
+
+```text
+q_n = 2 pi n/(N a),       q_n R a = 2 pi n R/N
+```
+
+なので、N/Rを固定すると同じ `mode_index=n` が全Rで同じdimensionless wave number `qR` を表します。これによりlong-wave window、finite-q correction、D fit、data collapseを同じdimensionless resolutionで比較できます。同時にR/Nも固定されますが、有限サイズ効果は各Rの `N/xi_dyn` と `q_min xi_dyn` でも確認します。
+
+primary protocolでは `B=2.0`、`sigma_J=1.0`、`sigma_phi=0.06`、`phi_bar=0`、`a=1`、`branch=stay_to_evacuate` を固定します。Gaussian modelでは
+
+```text
+sigma_eff(R) = sqrt(sigma_J^2/(2R) + sigma_phi^2)
+mu(R) = B sqrt(2 pi) sigma_eff(R)/2
+```
+
+なので、Rとともに `sigma_eff` と `mu` の両方が変わります。これはmu固定の純粋なgeometric range sweepではなく、**same dimensionless Gaussian spinodal control B** のもとでcoordination/rangeを変える比較です。
+
+離散top-hat kernelについて
+
+```text
+Khat_R(q) = (1/R) sum_{r=1}^R cos(q r a)
+kappa_R = a^2 (R+1)(2R+1)/12 ~ a^2 R^2/6
+Gamma(q)-Gamma0 = -ln Khat_R(q) = kappa_R q^2 + O(q^4)
+```
+
+です。このためraw Dだけでなく `D/kappa_R` をprimary spatial comparisonとし、`xi_dyn=sqrt(D/Gamma0)` も `xi_dyn/R` で比較します。
+
+科学的な仮説は、R増加に伴うGaussian closureへの接近またはそこからのずれを測ることです。`R` が大きければ必ずmean-fieldになる、operational crossoverが必ずdelta=0へ近づく、あるいは有限Rで真のmicroscopic spinodalを確認できる、とは仮定しません。
+
+### Stage G1: local Gaussian Phase0–4 R sweep
+
+まず全unit testを実行し、その後serial driverを実行します。Phase1–2はMPIを使用しません。
+
+```bash
+source .venv/bin/activate
+python3 -m unittest discover -s tests -v
+
+python3 src/spinodal_gaussian_R_sweep.py \
+  --R-list 6,12,24,48 \
+  --reference-R 12 \
+  --reference-N 1024 \
+  --B 2.0 \
+  --sigma-J 1.0 \
+  --sigma-phi 0.06 \
+  --delta-list 1e-2,3e-3,1e-3,3e-4,1e-4,3e-5,1e-5 \
+  --modes 0,1,2,3,4,5,6 \
+  --output-dir results/runs/gaussian_R_sweep
+```
+
+同じコマンドは `scripts/run_gaussian_R_sweep_local.sh` でも実行できます。各Rの既存形式出力は `R006/phase0`、`R006/phase12`、`R006/phase34` のように分離されます。R横断の主要出力は次のとおりです。
+
+- `gaussian_R_sweep_summary.csv`: `p_Gamma`、`p_xi`、z、nearest-spinodalのD/kappa、collapse品質
+- `gaussian_R_sweep_delta_table.csv`: 各 `(R,delta)` のGamma、D、xi、finite-size診断
+- `gaussian_R_sweep_validation_summary.json`: qR一致、全Phase soft checks、固定B protocol
+- `gaussian_R_*.png`: Gamma scaling、指数、D/kappa、kappa、xi/R、collapse、normalized dispersionの7図
+
+全Rで `primary_delta_max=3e-4`、`qR_max_fit=0.35`、`qR_max_collapse=0.35` を共通使用し、expected exponentに合わせてR別fit windowを変更しません。
+
+### Stage M1: SQUID microscopic R benchmark
+
+Phase5専用venv、`BaseCPU` / Intel MPI、absolute `PHASE5_PY` を既存設定のまま使用します。
+
+```bash
+qsub scripts/run_phase5_squid_R_benchmark.sh
+qstat
+```
+
+完了後、各 `Rxxx/benchmark/benchmarks/phase5_block_size_benchmark.csv` の `trial_site_steps_per_sec`、`seconds`、`peak_rss_mb` と `environment.json` を確認します。`R=48,N=4096` のproduction見積りはこの実測を使います。
+
+### Stage M2: unperturbed coarse pseudospinodal scan
+
+まず全Rで `delta=0.04,0.05,0.06,0.07,0.08,0.10,0.12,0.16`、`epsilon=0`、mode 0、M=2048、T=50を実行します。
+
+```bash
+qsub scripts/run_phase5_squid_R_pseudospinodal_coarse.sh
+qstat
+cat results/runs/phase5_R_sweep/fine_scan_plan.csv
+```
+
+10% cumulative first-passage escapeを一意に挟めたRには、幅0.002以下のfine gridが `fine_deltas` に保存されます。bracketがない場合は恣意的にGaussian側へ寄せず、固定 `extension_factor=1.5` で次の1点を提案します。
+
+- 全点でescape <10%: `delta_min/1.5` をsmall-delta側へ追加
+- 全点でescape >10%: `1.5*delta_max` をlarge-delta側へ追加
+- 非単調で一意に挟めない: 自動fine scanを停止して確認
+
+拡張点は別checkpointへ保存します。例えばplanがsmall側 `0.0266666667` を要求した場合は次のように投入し、再度planを確認します。
+
+```bash
+qsub -v PHASE5_COARSE_TAG=_extension1,PHASE5_COARSE_DELTAS=0.0266666667 \
+  scripts/run_phase5_squid_R_pseudospinodal_coarse.sh
+```
+
+### Stage M3: fine pseudospinodal scan
+
+全Rが `status=bracketed` になってから投入します。M=8192、burn=8、T=50で、T=20,30,40,50のoperational crossoverも同じrunから集約します。
+
+```bash
+qsub scripts/run_phase5_squid_R_pseudospinodal_fine.sh
+qstat
+```
+
+各Rで確認するファイル:
+
+```text
+results/runs/phase5_R_sweep/Rxxx/pseudospinodal_fine/phase5_run_state.json
+results/runs/phase5_R_sweep/Rxxx/pseudospinodal_fine/analysis/phase5_pseudospinodal_fine_scan.csv
+results/runs/phase5_R_sweep/Rxxx/pseudospinodal_fine/analysis/phase5_pseudospinodal_time_dependence.csv
+```
+
+`delta_ps^(10%,T)` はobservation-time-dependent metastable lifetimeのoperational crossoverであり、microscopic critical pointではありません。
+
+### Stage M4: fixed-Gaussian-delta response
+
+全RでGaussian spinodalから同じ距離 `delta=0.08,0.10,0.12` を比較します。escapeが大きくても削除せずsurvivalを併記します。
+
+```bash
+qsub -v PHASE5_RESPONSE_KIND=fixed scripts/run_phase5_squid_R_response.sh
+qstat
+```
+
+出力は各 `Rxxx/response_fixed_delta/` に保存されます。
+
+### Stage M5: operational matched response
+
+各Rの `delta_ps^(10%,T=50)+0.005,0.010,0.020` を比較します。これはStage M4のfixed Gaussian deltaとは異なる座標であり、統合CSVでも `coordinate` 列で分離します。
+
+```bash
+qsub -v PHASE5_RESPONSE_KIND=matched scripts/run_phase5_squid_R_response.sh
+qstat
+```
+
+出力は各 `Rxxx/response_matched/` に保存されます。M4・M5ともmode `0,1,4`、epsilon=0.05、M=8192、burn=8、T=50で、次を確認します。
+
+```text
+phase5_mode_results.csv
+analysis/phase5_gamma_eff.csv
+analysis/phase5_survival_conditioned.csv
+analysis/phase5_followup_validation_summary.json
+```
+
+primary比較はq=0の `Gamma_unconditional/Gamma_closure`、`Gamma_survive_to_T/Gamma_closure`、escape correction、`Gamma_eff(3)/Gamma_eff(0)`、Method B/C差です。survive-to-Tはfuture informationを使うbasin-internal診断であり、unconditional responseではありません。
+
+### Stage M6: representative finite-q dispersion
+
+primary responseを確認後、各Rの `delta_ps(T=50)+0.010` に限ってmode 0–6を実行します。
+
+```bash
+qsub scripts/run_phase5_squid_R_dispersion.sh
+qstat
+```
+
+各 `Rxxx/dispersion/phase5_dispersion_fits.csv` の `D_micro`、CI、`D_micro/kappa_R` を確認します。R点は4点だけなので、Rに対するpower lawをprimaryな「finite-range crossover exponent」としてfitしません。
+
+### Stage A: combined R analysis
+
+SQUID結果をローカルの同じパスへ転送後に実行します。
+
+```bash
+scripts/run_R_sweep_analysis_local.sh
+```
+
+`results/runs/R_sweep_combined/` に以下を生成します。
+
+- `microscopic_R_pseudospinodal.csv`
+- `microscopic_R_response.csv`
+- `microscopic_R_dispersion.csv`
+- `microscopic_R_benchmark.csv`
+- `R_sweep_combined_summary.csv`
+- `R_sweep_combined_validation_summary.json`
+- `micro_R_*.png` 7図
+
+統合解析はGaussian closureのR依存、finite-range microscopic correction、operational pseudospinodal-like crossover、observation-time dependenceを報告します。結果が仮説と反対でも除外やfit window変更は行いません。
+
+長波長relaxational dynamicsと今回のmicroscopic比較の背景は、R. J. Glauber, *J. Math. Phys.* **4**, 294 (1963), [DOI:10.1063/1.1703954](https://doi.org/10.1063/1.1703954)、P. C. Hohenberg and B. I. Halperin, *Rev. Mod. Phys.* **49**, 435 (1977), [DOI:10.1103/RevModPhys.49.435](https://doi.org/10.1103/RevModPhys.49.435)、H. Mori, S. Miyashita, and P. A. Rikvold, *Phys. Rev. E* **81**, 011135 (2010), [DOI:10.1103/PhysRevE.81.011135](https://doi.org/10.1103/PhysRevE.81.011135)、E. S. Loscar et al., *J. Chem. Phys.* **131**, 024120 (2009), [DOI:10.1063/1.3168404](https://doi.org/10.1063/1.3168404)を参照してください。finite-range transient nucleationの補助的背景としてJ. Schweiger, K. Barros, and W. Klein, *Phys. Rev. E* **75**, 031102 (2007)も参照します。
+
 ## 実行例
 
 軽量な動作確認:
@@ -557,6 +745,8 @@ python3 scripts/replot_lambda_summary_vertical.py \
 - `src/spinodal_phase5_mpi.py`: weighted ensemble-block MPI driverとserial fallback
 - `src/spinodal_phase5_analysis.py`: block bootstrap、closure比較、分散・図のrank0解析
 - `src/spinodal_phase5_followup_analysis.py`: Gamma_eff、preparation、survival、operational crossover解析
+- `src/spinodal_gaussian_R_sweep.py`: serial Gaussian Phase0–4 systematic R sweep
+- `src/spinodal_R_sweep_analysis.py`: microscopic fine-grid計画とGaussian/microscopic統合R解析
 - `src/spatial_mode_presentation_materials_sweeps_v2.py`: 複数 seed・パラメータスイープ
 - `src/spatial_mode_presentation_materials_sweeps_mpi.py`: MPI 並列版
 - `scripts/replot_*.py`: 保存済み CSV から図を再作成

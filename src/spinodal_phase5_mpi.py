@@ -332,6 +332,7 @@ def build_phase5_tasks(
     save_structure_factor: bool,
     track_survival: bool = False,
     unperturbed: bool = False,
+    task_id_prefix: str = "",
 ) -> list[Phase5Task]:
     inputs = summary["inputs"]
     R = int(inputs["R"])
@@ -367,7 +368,8 @@ def build_phase5_tasks(
                 )
             for epsilon_index, epsilon_fraction in enumerate(epsilon_fractions):
                 task_id = (
-                    f"task_d{delta_index:03d}_m{mode_index:03d}_e{epsilon_index:02d}"
+                    f"{task_id_prefix}task_d{delta_index:03d}_"
+                    f"m{mode_index:03d}_e{epsilon_index:02d}"
                 )
                 tasks.append(
                     Phase5Task(
@@ -561,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--qR-max-fit", type=float, default=0.35)
     parser.add_argument("--float-dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--base-seed", type=int, default=20260815)
+    parser.add_argument(
+        "--task-id-prefix",
+        default="",
+        help="optional stable prefix; R sweeps use labels such as R006_",
+    )
     parser.add_argument("--bootstrap-seed", type=int, default=20260816)
     parser.add_argument("--bootstrap-replicates", type=int, default=1000)
     parser.add_argument("--M-convergence-candidates", type=parse_int_list, default=(512, 1024, 2048, 4096))
@@ -661,6 +668,7 @@ def main() -> None:
                 save_structure_factor=args.save_structure_factor,
                 track_survival=args.track_survival,
                 unperturbed=args.unperturbed,
+                task_id_prefix=args.task_id_prefix,
             )
             all_units = [unit for task in tasks for unit in build_work_units(task)]
             assignments = weighted_lpt_assignment(all_units, WORLD_SIZE)
