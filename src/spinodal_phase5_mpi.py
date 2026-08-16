@@ -267,22 +267,31 @@ def build_analytic_phase5_references(
             if reliable and q * R * lattice_spacing <= qR_max_fit:
                 eligible_q2.append(q * q)
                 eligible_gamma.append(gamma_q)
-        if len(eligible_q2) < 2 or max(eligible_q2) <= min(eligible_q2):
+        if len(eligible_q2) >= 2 and max(eligible_q2) > min(eligible_q2):
+            design = np.column_stack(
+                (np.ones(len(eligible_q2), dtype=float), np.asarray(eligible_q2))
+            )
+            beta, _, _, _ = np.linalg.lstsq(
+                design, np.asarray(eligible_gamma, dtype=float), rcond=None
+            )
+            gamma0_reference = float(beta[0])
+            D_reference = float(beta[1])
+        elif tuple(sorted(set(int(mode) for mode in modes))) == (0,):
+            # An unperturbed survival-only scan has no dispersion observable.
+            # Supply the analytic long-wave coefficient solely to satisfy the
+            # shared Phase5 reference schema; it is not fitted from this run.
+            gamma0_reference = float(eligible_gamma[0])
+            D_reference = float(kappa_R)
+        else:
             raise ValueError(
                 "analytic reference dispersion needs at least two eligible modes "
                 f"for delta={point.delta:g}"
             )
-        design = np.column_stack(
-            (np.ones(len(eligible_q2), dtype=float), np.asarray(eligible_q2))
-        )
-        beta, _, _, _ = np.linalg.lstsq(
-            design, np.asarray(eligible_gamma, dtype=float), rcond=None
-        )
         dispersion_rows.append(
             {
                 "delta": point.delta,
-                "D_fit": float(beta[1]),
-                "Gamma0_dispersion_fit": float(beta[0]),
+                "D_fit": D_reference,
+                "Gamma0_dispersion_fit": gamma0_reference,
                 "kappa_R_theory": kappa_R,
                 "n_modes_used": len(eligible_q2),
                 "qR_max_fit": qR_max_fit,
@@ -321,6 +330,8 @@ def build_phase5_tasks(
     base_seed: int,
     stage: str,
     save_structure_factor: bool,
+    track_survival: bool = False,
+    unperturbed: bool = False,
 ) -> list[Phase5Task]:
     inputs = summary["inputs"]
     R = int(inputs["R"])
@@ -392,6 +403,8 @@ def build_phase5_tasks(
                         float_dtype=float_dtype,
                         base_seed=base_seed,
                         save_structure_factor=save_structure_factor,
+                        track_survival=track_survival,
+                        unperturbed=unperturbed,
                     )
                 )
     return tasks
@@ -567,6 +580,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="debug only: save the full plus-side structure factor in block checkpoints",
     )
+    parser.add_argument(
+        "--track-survival",
+        action="store_true",
+        help="write schema-v2 first-passage and survivor sufficient statistics",
+    )
+    parser.add_argument(
+        "--unperturbed",
+        action="store_true",
+        help="set epsilon exactly to zero for baseline survival diagnostics",
+    )
     return parser
 
 
@@ -604,9 +627,13 @@ def main() -> None:
                     load_phase5_references(args.phase0_dir, args.phase12_dir)
                 )
             epsilon_fractions = (
-                tuple(args.epsilon_fractions)
-                if args.epsilon_fractions
-                else (float(args.epsilon_fraction),)
+                (0.0,)
+                if args.unperturbed
+                else (
+                    tuple(args.epsilon_fractions)
+                    if args.epsilon_fractions
+                    else (float(args.epsilon_fraction),)
+                )
             )
             tasks = build_phase5_tasks(
                 summary,
@@ -632,6 +659,8 @@ def main() -> None:
                 base_seed=args.base_seed,
                 stage=args.stage,
                 save_structure_factor=args.save_structure_factor,
+                track_survival=args.track_survival,
+                unperturbed=args.unperturbed,
             )
             all_units = [unit for task in tasks for unit in build_work_units(task)]
             assignments = weighted_lpt_assignment(all_units, WORLD_SIZE)
@@ -663,6 +692,9 @@ def main() -> None:
                     "n_work_units": len(all_units),
                     "rng_rank_independent": True,
                     "space_decomposition": False,
+                    "checkpoint_schema_version": 2,
+                    "survival_tracking_enabled": bool(args.track_survival),
+                    "unperturbed_baseline": bool(args.unperturbed),
                 }
             )
             for key, value in list(run_config.items()):

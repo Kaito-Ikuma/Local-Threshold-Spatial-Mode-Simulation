@@ -31,7 +31,8 @@ from typing import Any
 import numpy as np
 
 
-SCRIPT_VERSION = "2026.08.16-phase5-v2"
+SCRIPT_VERSION = "2026.08.16-phase5-v3-followup"
+CHECKPOINT_SCHEMA_VERSION = 2
 MICROSCOPIC_KERNELS = ("aggregated_exact", "direct_J")
 INITIALIZATION_MODES = ("prepared_metastable", "bernoulli_meanfield")
 
@@ -70,6 +71,8 @@ class Phase5Task:
     float_dtype: str = "float64"
     base_seed: int = 20260815
     save_structure_factor: bool = False
+    track_survival: bool = False
+    unperturbed: bool = False
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,17 @@ class Phase5BlockResult:
     escape_fraction: np.ndarray
     preparation_magnetization: np.ndarray
     structure_factor: np.ndarray
+    escape_fraction_cumulative: np.ndarray
+    survival_fraction_cumulative: np.ndarray
+    survival_count: np.ndarray
+    survivor_amplitude_sum_current: np.ndarray
+    A_q_surviving_current: np.ndarray
+    survive_to_T_amplitude_sum: np.ndarray
+    A_q_survive_to_T: np.ndarray
+    baseline_m_surviving_current: np.ndarray
+    survive_to_T_count: int
+    checkpoint_schema_version: int
+    survival_tracking_enabled: bool
     threshold_checksum: str
     rng_identifier: dict[str, Any]
     microscopic_kernel: str
@@ -132,8 +146,12 @@ def validate_task(task: Phase5Task) -> None:
         raise ValueError("fit window must satisfy 0 <= start < end <= T")
     if task.mode_index < 0 or task.mode_index > task.N // 2:
         raise ValueError("mode_index must lie in [0,N/2]")
-    if task.epsilon_fraction <= 0.0:
-        raise ValueError("epsilon_fraction must be positive")
+    if task.epsilon_fraction < 0.0 or (
+        task.epsilon_fraction == 0.0 and not task.unperturbed
+    ):
+        raise ValueError(
+            "epsilon_fraction must be positive unless unperturbed=True"
+        )
     if task.sigma_J < 0.0 or task.sigma_phi < 0.0:
         raise ValueError("noise scales must be non-negative")
     if task.float_dtype not in {"float64", "float32"}:
@@ -207,6 +225,17 @@ def task_fingerprint(task: Phase5Task) -> str:
     """Hash every simulation-setting field used to validate resume files."""
     serialized = json.dumps(
         asdict(task), sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def legacy_task_fingerprint(task: Phase5Task) -> str:
+    """Return the pre-follow-up fingerprint used by schema-v1 checkpoints."""
+    payload = asdict(task)
+    payload.pop("track_survival", None)
+    payload.pop("unperturbed", None)
+    serialized = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
 
@@ -464,6 +493,24 @@ def cosine_amplitude(response: np.ndarray, mode_index: int, a: float) -> float:
     )
 
 
+def cosine_amplitude_batch(
+    responses: np.ndarray, mode_index: int, a: float
+) -> np.ndarray:
+    """Return one cosine-mode amplitude per trial."""
+    array = np.asarray(responses, dtype=float)
+    if array.ndim != 2:
+        raise ValueError("responses must have shape (trials,N)")
+    N = array.shape[1]
+    q = 2.0 * math.pi * mode_index / (N * a)
+    factor = (
+        1.0
+        if mode_index == 0 or (N % 2 == 0 and mode_index == N // 2)
+        else 2.0
+    )
+    cosine = np.cos(q * np.arange(N, dtype=float) * a)
+    return factor * (array @ cosine) / N
+
+
 def apply_paired_mode_perturbation(
     base_states: np.ndarray,
     *,
@@ -509,16 +556,24 @@ def _threshold_checksum(thresholds: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(thresholds).view(np.uint8)).hexdigest()
 
 
-def _escape_fraction(
+def _escape_mask(
     states_plus: np.ndarray, states_minus: np.ndarray, task: Phase5Task
-) -> float:
+) -> np.ndarray:
+    """Return the instantaneous per-trial Gaussian-threshold escape mask."""
     pair_m = 0.5 * (
         states_plus.mean(axis=1, dtype=float)
         + states_minus.mean(axis=1, dtype=float)
     )
     if task.branch == "stay_to_evacuate":
-        return float(np.mean(pair_m > task.m_spinodal))
-    return float(np.mean(pair_m < task.m_spinodal))
+        return pair_m > task.m_spinodal
+    return pair_m < task.m_spinodal
+
+
+def _escape_fraction(
+    states_plus: np.ndarray, states_minus: np.ndarray, task: Phase5Task
+) -> float:
+    """Preserve the original instantaneous escape-fraction definition."""
+    return float(np.mean(_escape_mask(states_plus, states_minus, task)))
 
 
 def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
@@ -534,7 +589,11 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         size=(work_unit.block_n, task.N),
     ).astype(dtype, copy=False)
     threshold_checksum = _threshold_checksum(thresholds)
-    epsilon = task.epsilon_fraction * abs(task.m_star - task.m_spinodal)
+    epsilon = (
+        0.0
+        if task.unperturbed
+        else task.epsilon_fraction * abs(task.m_star - task.m_spinodal)
+    )
 
     if task.initialization_mode == "prepared_metastable":
         base, preparation_m = prepare_metastable_block(
@@ -563,6 +622,19 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         if task.save_structure_factor
         else np.empty((0, 0), dtype=float)
     )
+    empty = np.empty(0, dtype=float)
+    escape_cumulative = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
+    survival_fraction = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
+    survival_count = np.empty(task.T + 1, dtype=np.int64) if task.track_survival else np.empty(0, dtype=np.int64)
+    survivor_sum_current = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
+    A_surviving_current = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
+    baseline_surviving_current = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
+    trial_amplitude_history = (
+        np.empty((work_unit.block_n, task.T + 1), dtype=float)
+        if task.track_survival
+        else np.empty((0, 0), dtype=float)
+    )
+    alive = np.ones(work_unit.block_n, dtype=bool)
 
     def record(index: int) -> None:
         plus_profile = states_plus.mean(axis=0, dtype=float)
@@ -573,6 +645,31 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         mean_minus[index] = float(np.mean(minus_profile))
         baseline[index] = 0.5 * (mean_plus[index] + mean_minus[index])
         escape[index] = _escape_fraction(states_plus, states_minus, task)
+        if task.track_survival:
+            escaped_now = _escape_mask(states_plus, states_minus, task)
+            alive[:] = alive & ~escaped_now
+            trial_response = 0.5 * (
+                states_plus.astype(float) - states_minus.astype(float)
+            )
+            trial_amplitudes = cosine_amplitude_batch(
+                trial_response, task.mode_index, task.lattice_spacing
+            )
+            trial_amplitude_history[:, index] = trial_amplitudes
+            trial_baseline = 0.5 * (
+                states_plus.mean(axis=1, dtype=float)
+                + states_minus.mean(axis=1, dtype=float)
+            )
+            count = int(np.sum(alive))
+            survival_count[index] = count
+            survival_fraction[index] = count / work_unit.block_n
+            escape_cumulative[index] = 1.0 - survival_fraction[index]
+            survivor_sum_current[index] = float(np.sum(trial_amplitudes[alive]))
+            A_surviving_current[index] = (
+                survivor_sum_current[index] / count if count else math.nan
+            )
+            baseline_surviving_current[index] = (
+                float(np.sum(trial_baseline[alive])) / count if count else math.nan
+            )
         if task.save_structure_factor:
             centered = states_plus - states_plus.mean(axis=1, keepdims=True)
             spectrum = np.fft.rfft(centered, axis=1)
@@ -595,6 +692,21 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         record(index + 1)
     if threshold_checksum != _threshold_checksum(thresholds):
         raise RuntimeError("quenched thresholds changed during simulation")
+
+    if task.track_survival:
+        survive_to_T_count = int(np.sum(alive))
+        survive_to_T_sum = np.sum(
+            trial_amplitude_history[alive], axis=0, dtype=float
+        )
+        A_survive_to_T = (
+            survive_to_T_sum / survive_to_T_count
+            if survive_to_T_count
+            else np.full(task.T + 1, math.nan, dtype=float)
+        )
+    else:
+        survive_to_T_count = 0
+        survive_to_T_sum = empty.copy()
+        A_survive_to_T = empty.copy()
 
     q = 2.0 * math.pi * task.mode_index / (task.N * task.lattice_spacing)
     return Phase5BlockResult(
@@ -621,6 +733,17 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         escape_fraction=escape,
         preparation_magnetization=preparation_m,
         structure_factor=structure_factor,
+        escape_fraction_cumulative=escape_cumulative,
+        survival_fraction_cumulative=survival_fraction,
+        survival_count=survival_count,
+        survivor_amplitude_sum_current=survivor_sum_current,
+        A_q_surviving_current=A_surviving_current,
+        survive_to_T_amplitude_sum=survive_to_T_sum,
+        A_q_survive_to_T=A_survive_to_T,
+        baseline_m_surviving_current=baseline_surviving_current,
+        survive_to_T_count=survive_to_T_count,
+        checkpoint_schema_version=CHECKPOINT_SCHEMA_VERSION,
+        survival_tracking_enabled=task.track_survival,
         threshold_checksum=threshold_checksum,
         rng_identifier=rng_identifier(work_unit),
         microscopic_kernel=task.microscopic_kernel,
@@ -655,6 +778,14 @@ def save_block_checkpoint(result: Phase5BlockResult, path: Path) -> None:
             escape_fraction=result.escape_fraction,
             preparation_magnetization=result.preparation_magnetization,
             structure_factor=result.structure_factor,
+            escape_fraction_cumulative=result.escape_fraction_cumulative,
+            survival_fraction_cumulative=result.survival_fraction_cumulative,
+            survival_count=result.survival_count,
+            survivor_amplitude_sum_current=result.survivor_amplitude_sum_current,
+            A_q_surviving_current=result.A_q_surviving_current,
+            survive_to_T_amplitude_sum=result.survive_to_T_amplitude_sum,
+            A_q_survive_to_T=result.A_q_survive_to_T,
+            baseline_m_surviving_current=result.baseline_m_surviving_current,
         )
         handle.flush()
         os.fsync(handle.fileno())
@@ -686,6 +817,18 @@ def load_block_checkpoint(
                 for name in required
                 if name != "metadata_json"
             }
+            optional = {
+                "escape_fraction_cumulative",
+                "survival_fraction_cumulative",
+                "survival_count",
+                "survivor_amplitude_sum_current",
+                "A_q_surviving_current",
+                "survive_to_T_amplitude_sum",
+                "A_q_survive_to_T",
+                "baseline_m_surviving_current",
+            }
+            for name in optional & set(archive.files):
+                arrays[name] = np.asarray(archive[name]).copy()
     except Exception as exc:
         raise ValueError(f"corrupt Phase5 checkpoint {path}: {exc}") from exc
     if expected_unit is not None:
@@ -699,8 +842,46 @@ def load_block_checkpoint(
             raise ValueError("checkpoint start_trial mismatch")
         if int(metadata.get("end_trial", -1)) != expected_unit.end_trial:
             raise ValueError("checkpoint end_trial mismatch")
-        expected_fingerprint = task_fingerprint(expected_unit.task)
-        if metadata.get("task_fingerprint") != expected_fingerprint:
+        schema_version = int(metadata.get("checkpoint_schema_version", 1))
+        expected_fingerprint = (
+            legacy_task_fingerprint(expected_unit.task)
+            if schema_version == 1
+            else task_fingerprint(expected_unit.task)
+        )
+        fingerprint_matches = metadata.get("task_fingerprint") == expected_fingerprint
+        if not fingerprint_matches and schema_version == 1:
+            # Schema-v1 hashes included platform-evaluated analytic floats.
+            # SQUID and macOS libm can differ at the last bit, so transferred
+            # legacy checkpoints are validated against all stored physical
+            # metadata and array shapes instead of being declared corrupt.
+            task = expected_unit.task
+            expected_q = 2.0 * math.pi * task.mode_index / (
+                task.N * task.lattice_spacing
+            )
+            scalar_pairs = (
+                (metadata.get("delta"), task.delta),
+                (metadata.get("Delta"), task.Delta),
+                (metadata.get("epsilon_fraction"), task.epsilon_fraction),
+                (metadata.get("q"), expected_q),
+                (metadata.get("qR"), expected_q * task.R * task.lattice_spacing),
+            )
+            legacy_compatible = (
+                metadata.get("task_id") == task.task_id
+                and metadata.get("task_group") == task.task_group
+                and int(metadata.get("mode_index", -1)) == task.mode_index
+                and metadata.get("microscopic_kernel") == task.microscopic_kernel
+                and metadata.get("initialization_mode") == task.initialization_mode
+                and all(
+                    value is not None
+                    and math.isclose(
+                        float(value), float(expected), rel_tol=1e-12, abs_tol=1e-15
+                    )
+                    for value, expected in scalar_pairs
+                )
+            )
+            if not legacy_compatible:
+                raise ValueError("checkpoint task configuration mismatch")
+        elif not fingerprint_matches:
             raise ValueError("checkpoint task configuration mismatch")
         expected_time_shape = (expected_unit.task.T + 1,)
         for name in (
@@ -712,8 +893,48 @@ def load_block_checkpoint(
         ):
             if arrays[name].shape != expected_time_shape:
                 raise ValueError(f"checkpoint {name} shape mismatch")
-    if not all(np.all(np.isfinite(value)) for value in arrays.values()):
+        if expected_unit.task.track_survival:
+            survival_time_arrays = (
+                "escape_fraction_cumulative",
+                "survival_fraction_cumulative",
+                "survival_count",
+                "survivor_amplitude_sum_current",
+                "A_q_surviving_current",
+                "survive_to_T_amplitude_sum",
+                "A_q_survive_to_T",
+                "baseline_m_surviving_current",
+            )
+            if not bool(metadata.get("survival_tracking_enabled", False)):
+                raise ValueError("checkpoint lacks requested survival tracking")
+            for name in survival_time_arrays:
+                if name not in arrays or arrays[name].shape != expected_time_shape:
+                    raise ValueError(f"checkpoint {name} shape mismatch")
+    core_array_names = {
+        "A_q",
+        "mean_m_plus",
+        "mean_m_minus",
+        "baseline_m",
+        "escape_fraction",
+        "preparation_magnetization",
+        "structure_factor",
+    }
+    if not all(
+        np.all(np.isfinite(arrays[name]))
+        for name in core_array_names
+        if name in arrays
+    ):
         raise ValueError(f"checkpoint contains non-finite values: {path}")
+    metadata.setdefault("checkpoint_schema_version", 1)
+    metadata.setdefault("survival_tracking_enabled", False)
+    metadata.setdefault("survive_to_T_count", 0)
+    arrays.setdefault("escape_fraction_cumulative", np.empty(0, dtype=float))
+    arrays.setdefault("survival_fraction_cumulative", np.empty(0, dtype=float))
+    arrays.setdefault("survival_count", np.empty(0, dtype=np.int64))
+    arrays.setdefault("survivor_amplitude_sum_current", np.empty(0, dtype=float))
+    arrays.setdefault("A_q_surviving_current", np.empty(0, dtype=float))
+    arrays.setdefault("survive_to_T_amplitude_sum", np.empty(0, dtype=float))
+    arrays.setdefault("A_q_survive_to_T", np.empty(0, dtype=float))
+    arrays.setdefault("baseline_m_surviving_current", np.empty(0, dtype=float))
     try:
         return Phase5BlockResult(**metadata, **arrays)
     except TypeError as exc:

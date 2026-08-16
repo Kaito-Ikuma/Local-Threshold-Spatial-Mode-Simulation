@@ -398,6 +398,25 @@ assert not any(name == 'matplotlib' or name.startswith('matplotlib.') for name i
         self.assertEqual(len(dispersion), 2)
         self.assertTrue(np.all(np.isfinite(dispersion["D_fit"])))
 
+    def test_21_unperturbed_mode0_reference_needs_no_dispersion_fit(self) -> None:
+        summary, _, modes, dispersion = build_analytic_phase5_references(
+            deltas=(0.06, 0.07),
+            modes=(0,),
+            N=1024,
+            B=2.0,
+            R=12,
+            sigma_J=1.0,
+            sigma_phi=0.06,
+            phi_bar=0.0,
+            lattice_spacing=1.0,
+            branch="stay_to_evacuate",
+            qR_max_fit=0.45,
+        )
+        self.assertEqual(len(modes), 2)
+        np.testing.assert_allclose(
+            dispersion["D_fit"], summary["kappa_R_theory"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

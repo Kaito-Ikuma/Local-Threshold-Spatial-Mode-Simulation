@@ -351,20 +351,90 @@ qsub scripts/run_phase5_squid_shifted_pilot.sh
 qstat
 ```
 
-固定条件は生存側候補の `delta=0.065,0.070,0.080`、mode `0,1,4`、epsilon fraction `0.025,0.05,0.10`、`M=512`、`block-size=32`、`T=50`、fit window `0:3`、`aggregated_exact`、57 MPI ranksです。`T=50` の時系列はescape監視に残し、Gammaの初期緩和fitにはmethod B/Cが一致する短い窓を使います。既存のfit `0:10` の結果と混ざらないよう、出力先には `_fit3` を付けています。
+現在の固定条件は生存側候補の `delta=0.065,0.070,0.080`、mode `0,1,2,3,4,5,6`、epsilon fraction `0.025,0.05,0.10`、`M=8192`、`block-size=64`、`T=50`、fit window `0:3`、`qR<=0.45`、`aggregated_exact`、57 MPI ranksです。`T=50` の時系列はescape監視に残し、Gammaの初期緩和fitにはmethod B/Cが一致する短い窓を使います。
 
 ```bash
 "$PHASE5_PY" -m json.tool \
-  results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_run_state.json
+  results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_run_state.json
 "$PHASE5_PY" -m json.tool \
-  results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_validation_summary.json
-cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_epsilon_convergence.csv
-cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_M_convergence.csv
-cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_mode_results.csv
-cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_dispersion_fits.csv
+  results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_validation_summary.json
+cat results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_epsilon_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_M_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_mode_results.csv
+cat results/runs/phase5_B2_R12_shifted_dispersion_M8192/phase5_dispersion_fits.csv
 ```
 
 `delta>=0.065` のprimary epsilonで `reliable=true`、全時刻の `escape_fraction<=0.1`、epsilon/Mに対するGammaの安定を確認してから次へ進みます。`--analytic-references` は同じPhase0式とtop-hat kernelからreferenceを作り、標準Phase0/12出力は変更しません。
+
+#### Phase5 follow-up diagnostics
+
+M=8192 shifted runの次は、Gaussian closureへ結果を合わせるのではなく、microscopic relaxationの時間依存、準備手順依存、escape混入を順に分解します。一般的な時間依存緩和の背景として Glauber, “Time-Dependent Statistics of the Ising Model,” *J. Math. Phys.* **4**, 294 (1963), [DOI:10.1063/1.1703954](https://doi.org/10.1063/1.1703954)、および Hohenberg and Halperin, “Theory of Dynamic Critical Phenomena,” *Rev. Mod. Phys.* **49**, 435 (1977), [DOI:10.1103/RevModPhys.49.435](https://doi.org/10.1103/RevModPhys.49.435) を参照してください。現在の離散時間・非平衡・annealed-Gaussian-J modelを厳密なGlauber modelやModel Aと同一視しません。
+
+`Gamma_eff(t)=-ln|A(t+1)/A(t)|` はsingle-exponential近似が成立する時間領域の診断です。CSVには符号付きの `lambda_eff=A(t+1)/A(t)` と `sign_flip` も残し、絶対値によってzero crossingやoscillationを隠しません。block間SEから `A_q_snr=|A_q|/SE` を作り、既定の `SNR>=5` を数値的な推奨領域とします。この閾値は物理法則ではなく `--gamma-eff-min-snr` で変更できます。Gamma_effの不確かさはblock bootstrapで評価します。
+
+実行順は必ずA→B→C→Dです。
+
+##### Step A: 既存checkpointだけによるtime diagnostics
+
+新規simulationは行いません。schema-v1の8064 checkpointを直接読みます。
+
+```bash
+"$PHASE5_PY" scripts/analyze_phase5_time_diagnostics.py time \
+  --input-dir results/runs/phase5_B2_R12_shifted_dispersion_M8192 \
+  --output-dir results/runs/phase5_B2_R12_followup \
+  --gamma-eff-min-snr 5 \
+  --bootstrap-replicates 1000
+```
+
+ローカル転送時に `results/runs/runs/` となっている場合は `--input-dir` だけをその実在パスへ変更します。出力は `phase5_gamma_eff.csv` と `phase5_fit_window_extended.csv` です。fixed windows `0:3,0:5,1:3,1:5,2:5,2:7,3:7` をすべて保存し、closureに近いwindowを自動選択しません。plateau判定もprimary `0:3` を置き換えません。
+
+##### Step B: preparation dependence
+
+```bash
+qsub scripts/run_phase5_squid_preparation_scan.sh
+qstat
+```
+
+`burn_steps_per_stage=8,16,32` を別々のoutput/checkpointへ保存し、`delta=0.065,0.070,0.080`、mode `0,4`、epsilon `0.05`、M=8192で比較します。比較表は `results/runs/phase5_B2_R12_followup/phase5_preparation_scan.csv` です。既存のsingle Philox streamを維持するためthreshold realizationはstable IDで対応しますが、burn長が変わるとmeasurement開始時のRNG位置は変わります。
+
+##### Step C: survival-conditioned response
+
+Step Bの結果を確認し、必要ならscriptの `--burn-steps-per-stage` とoutput directoryを変更してから投入します。defaultはbaselineと同じ8であり、Bの結果を見ずに16/32を自動採用しません。
+
+```bash
+qsub scripts/run_phase5_squid_survival_conditioned.sh
+qstat
+```
+
+既存の `escape_fraction` は各時刻にthreshold外にいる割合であり、意味を変更しません。新しいcumulative escapeは「一度でもescapeしたtrialは戻さない」first-passage量です。`A_surviving_current` は時刻tまで生存した集合、`A_survive_to_T` は最終時刻まで生存する固定cohortです。後者はfuture informationを使うbasin-internal trajectory診断で、unconditional responseではありません。block集約はblock平均ではなく、保存したamplitude numeratorの総和をsurvivor総数で割ります。出力は `phase5_survival_conditioned.csv` です。
+
+checkpoint schemaは、従来ファイルをv1、survival sufficient statistics付き新規ファイルをv2として扱います。通常解析とStep Aはv1を読み込めます。v1へsurvival解析を要求すると、再実行が必要であることを明示して停止します。
+
+##### Step D: unperturbed fine pseudospinodal scan
+
+Step Bで準備手順を確認後に投入します。primary scanはepsilon=0であり、paired plus/minusは同一初期状態とcommon noiseにより同一trajectoryを保ちます。
+
+```bash
+qsub scripts/run_phase5_squid_pseudospinodal_fine.sh
+qstat
+```
+
+固定gridは `delta=0.058,0.060,0.062,0.064,0.066,0.068,0.070`、M=8192、T=50です。operational criterionは事前固定した
+
+```text
+P_esc^cum(T_obs=50) = 0.10
+```
+
+であり、これはtrue spinodalではなく「operational microscopic pseudospinodal-like 10%-escape crossover」です。局所的にmonotonicな隣接2点が10%を挟む場合だけ線形補間し、bracketがなければnullを返します。block bootstrapでescape probabilityと補間位置のSE・95%区間を計算し、同じrunから `T_obs=10,20,30,40,50` の時間依存も出します。
+
+有限range系のspinodal-like dynamicsの背景は Loscar et al., “Nonequilibrium characterization of spinodal points using short time dynamics,” *J. Chem. Phys.* **131**, 024120 (2009), [DOI:10.1063/1.3168404](https://doi.org/10.1063/1.3168404)、および Mori, Miyashita, and Rikvold, *Phys. Rev. E* **81**, 011135 (2010), [DOI:10.1103/PhysRevE.81.011135](https://doi.org/10.1103/PhysRevE.81.011135) を参照してください。
+
+Step A–Dの共通summaryは `phase5_followup_validation_summary.json`、fine scanは `phase5_pseudospinodal_fine_scan.csv`、観測時間依存は `phase5_pseudospinodal_time_dependence.csv` です。SQUIDでは全scriptが `--no-figures` を維持します。CSVをローカルへ転送後、8種類の図を生成します。
+
+```bash
+python3 scripts/replot_phase5_followup.py \
+  --input-dir results/runs/phase5_B2_R12_followup
+```
 
 #### Step 4: production
 
@@ -416,6 +486,11 @@ ldd "$PHASE5_VENV/bin/python" | grep -E "python|not found"
 - scripts/run_phase5_squid_env_smoke.sh: 2-rank preflight PBS job
 - scripts/run_phase5_squid_pseudospinodal_direct_j.sh: 1-rank direct_J preparation-survival scan
 - scripts/run_phase5_squid_shifted_pilot.sh: shifted-delta epsilon/M convergence pilot
+- scripts/run_phase5_squid_preparation_scan.sh: burn=8/16/32 preparation comparison
+- scripts/run_phase5_squid_survival_conditioned.sh: schema-v2 first-passage/survivor run
+- scripts/run_phase5_squid_pseudospinodal_fine.sh: epsilon=0 fine crossover scan
+- scripts/analyze_phase5_time_diagnostics.py: schema-v1/v2 checkpoint-only follow-up analysis
+- scripts/replot_phase5_followup.py: follow-up CSVからローカル図を再生成
 
 Mac上の参考benchmark（SQUID性能ではありません、N=1024, R=12, block=32, 50 steps, float64）では、direct_Jが6.47e6、aggregated_exactが3.51e7 trial-site-steps/sで、kernel部分のspeedupは5.43倍でした。block-size結果は16,32,64,128をCSVへ保存しましたが、production値はSQUID上の再測定後に決めてください。
 
@@ -481,6 +556,7 @@ python3 scripts/replot_lambda_summary_vertical.py \
 - `src/spinodal_phase5_core.py`: MPI非依存microscopic kernels、block simulation、checkpoint
 - `src/spinodal_phase5_mpi.py`: weighted ensemble-block MPI driverとserial fallback
 - `src/spinodal_phase5_analysis.py`: block bootstrap、closure比較、分散・図のrank0解析
+- `src/spinodal_phase5_followup_analysis.py`: Gamma_eff、preparation、survival、operational crossover解析
 - `src/spatial_mode_presentation_materials_sweeps_v2.py`: 複数 seed・パラメータスイープ
 - `src/spatial_mode_presentation_materials_sweeps_mpi.py`: MPI 並列版
 - `scripts/replot_*.py`: 保存済み CSV から図を再作成
