@@ -351,17 +351,17 @@ qsub scripts/run_phase5_squid_shifted_pilot.sh
 qstat
 ```
 
-固定条件は `delta=0.060,0.065,0.070,0.080`、mode `0,1,4`、epsilon fraction `0.025,0.05,0.10`、`M=512`、`block-size=32`、`T=50`、fit window `0:10`、`aggregated_exact`、57 MPI ranksです。`delta=0.060` はbreakdown control、それ以外は生存側の候補です。
+固定条件は生存側候補の `delta=0.065,0.070,0.080`、mode `0,1,4`、epsilon fraction `0.025,0.05,0.10`、`M=512`、`block-size=32`、`T=50`、fit window `0:3`、`aggregated_exact`、57 MPI ranksです。`T=50` の時系列はescape監視に残し、Gammaの初期緩和fitにはmethod B/Cが一致する短い窓を使います。既存のfit `0:10` の結果と混ざらないよう、出力先には `_fit3` を付けています。
 
 ```bash
 "$PHASE5_PY" -m json.tool \
-  results/runs/phase5_B2_R12_shifted_pilot/phase5_run_state.json
+  results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_run_state.json
 "$PHASE5_PY" -m json.tool \
-  results/runs/phase5_B2_R12_shifted_pilot/phase5_validation_summary.json
-cat results/runs/phase5_B2_R12_shifted_pilot/phase5_epsilon_convergence.csv
-cat results/runs/phase5_B2_R12_shifted_pilot/phase5_M_convergence.csv
-cat results/runs/phase5_B2_R12_shifted_pilot/phase5_mode_results.csv
-cat results/runs/phase5_B2_R12_shifted_pilot/phase5_dispersion_fits.csv
+  results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_validation_summary.json
+cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_epsilon_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_M_convergence.csv
+cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_mode_results.csv
+cat results/runs/phase5_B2_R12_shifted_pilot_fit3/phase5_dispersion_fits.csv
 ```
 
 `delta>=0.065` のprimary epsilonで `reliable=true`、全時刻の `escape_fraction<=0.1`、epsilon/Mに対するGammaの安定を確認してから次へ進みます。`--analytic-references` は同じPhase0式とtop-hat kernelからreferenceを作り、標準Phase0/12出力は変更しません。
