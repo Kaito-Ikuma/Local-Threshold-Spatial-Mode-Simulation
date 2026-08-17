@@ -51,8 +51,8 @@ def main() -> None:
     ps = read_optional(args.input_dir / "finite_size_pseudospinodal.csv")
     response = read_optional(args.input_dir / "finite_size_response.csv")
     D = read_optional(args.input_dir / "high_precision_D_over_kappa.csv")
-    if not D.empty and "production_M_sufficient" in D:
-        D = D[D["production_M_sufficient"]]
+    if not D.empty and "minimum_production_M_reached" in D:
+        D = D[D["minimum_production_M_reached"]]
     time = read_optional(args.input_dir / "completed_pseudospinodal_time_dependence.csv")
     r96 = read_optional(args.input_dir / "R96_validation.csv")
     seeds = read_optional(args.input_dir / "seed_reproducibility.csv")

@@ -27,23 +27,12 @@ esac
 
 # Validate every upstream input before starting the first expensive run.
 for PHASE5_R in $PHASE5_R_LIST; do
-  if [ "$PHASE5_M" -eq 65536 ] && [ "$PHASE5_R" -ne 24 ] && [ "$PHASE5_R" -ne 48 ]; then
-    echo "ERROR: M=65536 escalation is restricted to R=24 or R=48" >&2
-    exit 1
-  fi
   printf -v PHASE5_R_LABEL 'R%03d' "$PHASE5_R"
   PHASE5_TIME_TABLE="results/runs/phase5_R_sweep/${PHASE5_R_LABEL}/pseudospinodal_fine/analysis/phase5_pseudospinodal_time_dependence.csv"
   test -r "$PHASE5_TIME_TABLE"
   "$PHASE5_PY" src/spinodal_R_sweep_analysis.py print-matched-deltas \
     --time-table "$PHASE5_TIME_TABLE" --offsets 0.010 --T 50 >/dev/null
 done
-
-"$PHASE5_PY" src/spinodal_phase5_final_validation.py analyze-D \
-  --r-sweep-dir results/runs/phase5_R_sweep \
-  --output-dir results/runs/phase5_final_validation
-cat results/runs/phase5_final_validation/high_precision_D_over_kappa.csv
-"$PHASE5_PY" -m json.tool \
-  results/runs/phase5_final_validation/high_precision_D_validation_summary.json
 
 for PHASE5_R in $PHASE5_R_LIST; do
   case "$PHASE5_R" in
@@ -78,3 +67,11 @@ for PHASE5_R in $PHASE5_R_LIST; do
   "$PHASE5_PY" src/spinodal_phase5_followup_analysis.py survival \
     --input-dir "$PHASE5_OUTPUT" --output-dir "$PHASE5_OUTPUT/analysis"
 done
+
+# Always rebuild V2 decisions from the just-completed production outputs.
+"$PHASE5_PY" src/spinodal_phase5_final_validation.py analyze-D \
+  --r-sweep-dir results/runs/phase5_R_sweep \
+  --output-dir results/runs/phase5_final_validation
+cat results/runs/phase5_final_validation/high_precision_D_over_kappa.csv
+"$PHASE5_PY" -m json.tool \
+  results/runs/phase5_final_validation/high_precision_D_validation_summary.json

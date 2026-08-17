@@ -27,7 +27,7 @@ from spinodal_phase5_followup_analysis import (
 )
 
 
-SCRIPT_VERSION = "2026.08.16-phase5-final-validation-v1"
+SCRIPT_VERSION = "2026.08.17-phase5-final-validation-v2"
 PRIMARY_R = (6, 12, 24, 48)
 FINITE_SIZE_PAIRS = ((12, 512), (12, 1024), (12, 2048), (24, 1024), (24, 2048), (24, 4096))
 FINITE_SIZE_NEW_PAIRS = ((12, 512), (12, 2048), (24, 1024), (24, 4096))
@@ -449,6 +449,51 @@ def D_uncertainty_transform(D: float, D_se: float, ci_low: float, ci_high: float
     }
 
 
+def D_production_decision(
+    M: int,
+    ratio_se: float,
+    run_complete: bool,
+    *,
+    minimum_M: int = 32768,
+    maximum_M: int = 65536,
+    target_se: float = 0.25,
+) -> dict[str, Any]:
+    """Classify V2 precision without conflating minimum M and SE quality."""
+    minimum_reached = int(M) >= minimum_M
+    maximum_reached = int(M) >= maximum_M
+    precision_target_met = math.isfinite(float(ratio_se)) and float(ratio_se) <= target_se
+    needs_escalation = bool(
+        run_complete
+        and minimum_reached
+        and not maximum_reached
+        and not precision_target_met
+    )
+    sufficient = bool(run_complete and minimum_reached and precision_target_met)
+    finalized = bool(
+        run_complete and minimum_reached and (precision_target_met or maximum_reached)
+    )
+    if not run_complete:
+        status = "run_incomplete"
+    elif not minimum_reached:
+        status = "below_minimum_M"
+    elif precision_target_met:
+        status = "precision_target_met"
+    elif not maximum_reached:
+        status = "M65536_escalation_required"
+    else:
+        status = "maximum_M_reached_precision_target_not_met"
+    return {
+        "minimum_production_M_reached": minimum_reached,
+        "maximum_production_M_reached": maximum_reached,
+        "precision_target_SE": target_se,
+        "precision_target_met": precision_target_met,
+        "production_M_sufficient": sufficient,
+        "production_run_finalized": finalized,
+        "needs_M65536": needs_escalation,
+        "production_precision_status": status,
+    }
+
+
 def _kernel_slope(mode: pd.DataFrame, R: int, N: int) -> tuple[float, float]:
     eligible = mode[(mode["qR"] <= 0.35) & np.isfinite(mode["Gamma_micro"])].sort_values("mode_index")
     q0 = eligible[eligible["mode_index"] == 0]
@@ -488,6 +533,11 @@ def collect_D_precision(r_sweep_dir: Path) -> pd.DataFrame:
             float(fit["kappa_R"]),
         )
         kernel_slope, kernel_r2 = _kernel_slope(mode, R, N)
+        production = D_production_decision(
+            M,
+            transformed["D_over_kappa_SE"],
+            complete,
+        )
         rows.append(
             {
                 "R": R,
@@ -502,8 +552,7 @@ def collect_D_precision(r_sweep_dir: Path) -> pd.DataFrame:
                 **transformed,
                 "kernel_slope": kernel_slope,
                 "kernel_slope_r2": kernel_r2,
-                "production_M_sufficient": M >= 32768,
-                "needs_M65536": bool(R in (24, 48) and M >= 32768 and transformed["D_over_kappa_SE"] > 0.25 and M < 65536),
+                **production,
                 "run_complete": complete,
             }
         )
@@ -844,8 +893,8 @@ def analyze_D_precision(args: argparse.Namespace) -> list[Path]:
     output = args.output_dir
     csv_path = _write_table(table, output / "high_precision_D_over_kappa.csv")
     complete_table = (
-        table[table["run_complete"] & table["production_M_sufficient"]]
-        if not table.empty and {"run_complete", "production_M_sufficient"} <= set(table.columns)
+        table[table["run_complete"] & table["production_run_finalized"]]
+        if not table.empty and {"run_complete", "production_run_finalized"} <= set(table.columns)
         else pd.DataFrame()
     )
     condition_report = required_condition_report(D_PRECISION_R, set(complete_table.get("R", [])))
@@ -857,6 +906,35 @@ def analyze_D_precision(args: argparse.Namespace) -> list[Path]:
         "needs_M65536": (
             table[table["needs_M65536"]]["R"].astype(int).tolist()
             if not table.empty and "needs_M65536" in table
+            else []
+        ),
+        "precision_target_unmet_at_maximum_M": (
+            table[
+                table["maximum_production_M_reached"]
+                & ~table["precision_target_met"]
+            ]["R"].astype(int).tolist()
+            if not table.empty
+            and {"maximum_production_M_reached", "precision_target_met"} <= set(table.columns)
+            else []
+        ),
+        "production_not_sufficient": (
+            table[~table["production_M_sufficient"]]["R"].astype(int).tolist()
+            if not table.empty and "production_M_sufficient" in table
+            else list(D_PRECISION_R)
+        ),
+        "production_status_by_R": (
+            table[
+                [
+                    "R",
+                    "M_total",
+                    "D_over_kappa_SE",
+                    "production_M_sufficient",
+                    "production_run_finalized",
+                    "needs_M65536",
+                    "production_precision_status",
+                ]
+            ].to_dict(orient="records")
+            if not table.empty
             else []
         ),
         "automatic_M65536_submission": False,
@@ -902,8 +980,8 @@ def analyze_all(args: argparse.Namespace) -> list[Path]:
     complete_seeds = seeds[seeds["run_complete"]] if not seeds.empty and "run_complete" in seeds else pd.DataFrame()
     seed_conditions = set(zip(complete_seeds.get("R", []), complete_seeds.get("seed", [])))
     complete_D = (
-        D[D["run_complete"] & D["production_M_sufficient"]]
-        if not D.empty and {"run_complete", "production_M_sufficient"} <= set(D.columns)
+        D[D["run_complete"] & D["production_run_finalized"]]
+        if not D.empty and {"run_complete", "production_run_finalized"} <= set(D.columns)
         else pd.DataFrame()
     )
     complete_R96 = R96[R96["run_complete"]] if not R96.empty and "run_complete" in R96 else pd.DataFrame()

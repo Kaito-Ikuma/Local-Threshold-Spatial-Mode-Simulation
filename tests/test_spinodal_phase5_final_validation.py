@@ -27,6 +27,7 @@ from spinodal_phase5_final_validation import (
     D_PRECISION_R,
     FINITE_SIZE_PAIRS,
     SEEDS,
+    D_production_decision,
     D_uncertainty_transform,
     aggregate_seed_rows,
     required_condition_report,
@@ -117,6 +118,24 @@ class Phase5FinalValidationTests(unittest.TestCase):
         self.assertAlmostEqual(result["D_over_kappa_CI_low"], 1.2)
         self.assertAlmostEqual(result["D_over_kappa_CI_high"], 1.8)
         self.assertAlmostEqual(result["z_from_unity"], 0.5 / 0.15)
+
+        needs_more = D_production_decision(32768, 0.337, True)
+        self.assertFalse(needs_more["production_M_sufficient"])
+        self.assertTrue(needs_more["needs_M65536"])
+        self.assertEqual(needs_more["production_precision_status"], "M65536_escalation_required")
+
+        target_met = D_production_decision(32768, 0.212, True)
+        self.assertTrue(target_met["production_M_sufficient"])
+        self.assertFalse(target_met["needs_M65536"])
+
+        maximum_reached = D_production_decision(65536, 0.30, True)
+        self.assertFalse(maximum_reached["production_M_sufficient"])
+        self.assertTrue(maximum_reached["production_run_finalized"])
+        self.assertFalse(maximum_reached["precision_target_met"])
+        self.assertEqual(
+            maximum_reached["production_precision_status"],
+            "maximum_M_reached_precision_target_not_met",
+        )
 
     def test_06_time_extension_plans_only_unbracketed_scan(self) -> None:
         decision = time_extension_decision((0.04, 0.05), (0.05, 0.02))

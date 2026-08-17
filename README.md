@@ -757,13 +757,13 @@ V3までのpseudospinodal tableを確認してから、R=12,24,48 の `delta_ps(
 qsub scripts/run_phase5_squid_D_precision.sh
 ```
 
-V2は既存M6の各 `Rxxx/dispersion/blocks` にappendし、M=8192のstable block IDを再利用します。`high_precision_D_over_kappa.csv` の `D_over_kappa_SE` が概ね0.20–0.25を超える場合に限り、対象RだけM=65536へ追加できます。M-totalだけを増やすと既存M=32768 checkpointも再利用します。
+V2は既存M6の各 `Rxxx/dispersion/blocks` にappendし、M=8192のstable block IDを再利用します。`high_precision_D_over_kappa.csv` の `needs_M65536=True`、または `production_precision_status=M65536_escalation_required` となったRだけM=65536へ追加できます。R=12も対象です。M-totalだけを増やすと既存M=32768 checkpointも再利用します。
 
 ```bash
-qsub -v PHASE5_D_M=65536,PHASE5_D_R_LIST=24 scripts/run_phase5_squid_D_precision.sh
+qsub -v PHASE5_D_M=65536,PHASE5_D_R_LIST=12 scripts/run_phase5_squid_D_precision.sh
 ```
 
-M=65536への増強は自動ではありません。まずM=32768の不確かさを確認してから判断します。
+M=65536への増強は自動ではありません。`production_M_sufficient` はrun完了、M>=32768、SE目標0.25以下をすべて満たす場合だけTrueになります。最大MでもSE目標未達ならこれはFalseのままにし、`production_run_finalized=True` と `production_precision_status=maximum_M_reached_precision_target_not_met` を保存して、追加計算終了と精度未達を区別します。
 
 ### V5: seed reproducibility
 
