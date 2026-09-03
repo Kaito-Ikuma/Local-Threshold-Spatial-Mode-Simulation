@@ -483,6 +483,46 @@ poster primary PNG は `01_ResultA_micro_exponent.png`、`02_ResultB_micro_colla
 
 Result A の `p_R` は真の臨界指数ではなく effective/matched exponent です。Result B の `xi_dyn` collapse は内部整合性であり、同一 `R`・同一制御点の `xi_bnd` が利用できる場合だけ independent collapse を生成します。open boundary の `x=O(R)` には coordination loss による boundary layer があるため、全領域を単一 exponential に合わせません。
 
+### Poster final validation
+
+ポスター最終検証は、既存CSVだけを読む次のlocal post-processingから始めます。Result Bについて `X_max=max(q xi_dyn,micro)`、`D/SE(D)`、escape、drift、Method B/C agreementを診断し、既存データが固定基準 `X_max>=0.4` かつ `D/SE(D)>=2` を満たすか判定します。Result C/Dについて新しいsimulationは実行しません。
+
+```bash
+scripts/run_poster_final_validation_local.sh
+```
+
+Result Bの既存データが固定精度基準を満たさない場合のみ、まず `R=24` のoperational pseudospinodal-like crossoverからのmatched distance `s=0.001,0.002,0.003,0.005` を `M=16384` で追加します。`delta_ps` は既存の `P_esc^cum(Tobs=50)=0.10` 定義を使い、true spinodalとは解釈しません。
+
+```bash
+qsub scripts/run_phase5_squid_poster_B_refinement.sh
+```
+
+追加結果でも有限波数signalが存在しながら `D/SE(D)<2` の場合だけ、同じcheckpointをappend-onlyに増強します。理論値との一致は増強理由にしません。
+
+```bash
+qsub -v POSTER_B_R=24,POSTER_B_M=32768 \
+  scripts/run_phase5_squid_poster_B_refinement.sh
+```
+
+`R=48` は `R=24` の結果が意味を持つ場合だけ追加します。
+
+```bash
+qsub -v POSTER_B_R=48,POSTER_B_M=16384 \
+  scripts/run_phase5_squid_poster_B_refinement.sh
+```
+
+SQUID出力をlocalの `results/runs/poster_ABCD/B_refinement/` へ転送後、local scriptを再実行すると既存データと統合され、同一条件には大きい `M` の結果が使われます。
+
+追加解析は以下を出力します。
+
+- Result B: microscopic finite-q rangeとdispersion precision
+- Result C: `epsilon=0.025,0.05,0.10` に対する `xi_bnd` robustness
+- Result C: 固定窓 `x_min/R=1,2,3` に対するfit-window robustness
+- Result C: q=0 relaxation timeと実空間profileから独立に測った `xi_bnd` による `tau0~xi_bnd^z` test
+- Result D: boundary layer、境界透過率 `T_bnd`、`x>=2R` のbulk exponential decayの分離
+
+ポスター本文候補は `results/runs/poster_ABCD/poster_final_figures/`、全条件を含む診断図はその `diagnostics/` に保存します。A/Bはfinite-R microscopic dynamics、C/Dはdeterministic Gaussian closureです。独立z testでは `xi_dyn=sqrt(D/Gamma0)` を使わず、境界profileからfitした `xi_bnd` を使います。
+
 ## 実行例
 
 軽量な動作確認:
