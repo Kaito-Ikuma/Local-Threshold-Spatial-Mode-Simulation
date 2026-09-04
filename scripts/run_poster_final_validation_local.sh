@@ -20,6 +20,8 @@ mkdir -p "$MPLCONFIGDIR"
   --pseudospinodal-root results/runs/phase5_R_sweep \
   --phase6-dir results/runs/poster_ABCD/phase6_boundary \
   --phase12-dir results/runs/phase12_B2_R12 \
+  --q0-numeric-master results/runs/poster_ABCD/q0_full_numeric_validation/q0_numeric_all_5R.csv \
+  --fully-numeric-only \
   --epsilon-fraction 0.05 \
   --T-obs 50 \
   --qR-max 0.35 \

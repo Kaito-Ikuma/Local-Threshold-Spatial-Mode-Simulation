@@ -27,13 +27,14 @@ import numpy as np
 import pandas as pd
 import scipy
 from matplotlib.colors import LogNorm
+from matplotlib.ticker import ScalarFormatter
 from scipy.stats import t as student_t
 
 from spinodal_poster_abcd import fit_measured_dispersion, load_pseudospinodal
 from spinodal_phase34 import coefficient_of_determination, fit_power_law
 
 
-SCRIPT_VERSION = "2026.09.03-poster-final-validation-v1"
+SCRIPT_VERSION = "2026.09.04-poster-final-validation-v2"
 BOUNDARY_TYPES = (
     "ghost_dirichlet",
     "open_fixed_denominator",
@@ -42,6 +43,9 @@ BOUNDARY_TYPES = (
 PRIMARY_EPSILON = 0.05
 PRIMARY_DELTA_MAX = 3e-4
 PRIMARY_QR_MAX = 0.35
+FULL_NUMERIC_R_VALUES = (6, 12, 24, 48, 96)
+FULL_NUMERIC_DELTAS = (1e-5, 3e-5, 1e-4, 3e-4)
+FULL_NUMERIC_GAMMA_SOURCE = "deterministic q=0 numerical"
 
 
 def _coerce_bool(series: pd.Series) -> pd.Series:
@@ -384,6 +388,124 @@ def build_dynamic_z_tables(
     return points, pd.DataFrame(summaries)
 
 
+def build_fully_numeric_dynamic_z_tables(
+    xi_table: pd.DataFrame,
+    q0_numeric: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Join numerical q=0 rates to independent boundary lengths without fallback."""
+    q0_required = [
+        "R", "N", "delta", "epsilon_fraction", "Gamma0_num",
+        "Gamma0_source", "reliable",
+    ]
+    _require_columns(q0_numeric, q0_required, "q0_numeric_all_5R.csv")
+    q0 = q0_numeric.copy()
+    q0["reliable"] = _coerce_bool(q0["reliable"])
+    invalid_sources = q0[q0["Gamma0_source"] != FULL_NUMERIC_GAMMA_SOURCE]
+    if not invalid_sources.empty:
+        values = sorted(set(invalid_sources["Gamma0_source"].astype(str)))
+        raise ValueError(
+            "fully numerical z analysis rejects non-numerical Gamma0 sources: "
+            f"{values}"
+        )
+    q0 = q0[
+        q0["R"].isin(FULL_NUMERIC_R_VALUES)
+        & (q0["delta"] <= PRIMARY_DELTA_MAX * (1.0 + 1e-12))
+        & np.isclose(q0["epsilon_fraction"], PRIMARY_EPSILON, rtol=0.0, atol=1e-12)
+    ].copy()
+    if q0.duplicated(["R", "delta"]).any():
+        raise ValueError("q0_numeric_all_5R.csv has duplicate (R, delta) rows")
+
+    xi_required = [
+        "R", "N", "delta", "epsilon_fraction", "boundary_type", "xi_bnd_cosh",
+        "fit_x_min", "fit_reliable", "converged",
+    ]
+    _require_columns(xi_table, xi_required, "resultC_xi_boundary.csv")
+    xi = xi_table.copy()
+    xi["fit_reliable"] = _coerce_bool(xi["fit_reliable"])
+    xi["converged"] = _coerce_bool(xi["converged"])
+    xi = xi[
+        xi["R"].isin(FULL_NUMERIC_R_VALUES)
+        & (xi["boundary_type"] == "ghost_dirichlet")
+        & np.isclose(xi["epsilon_fraction"], PRIMARY_EPSILON, rtol=0.0, atol=1e-12)
+        & (xi["delta"] <= PRIMARY_DELTA_MAX * (1.0 + 1e-12))
+        & np.isclose(xi["fit_x_min"], 2.0 * xi["R"], rtol=0.0, atol=1e-9)
+    ][
+        ["R", "N", "delta", "epsilon_fraction", "xi_bnd_cosh", "fit_x_min",
+         "fit_reliable", "converged"]
+    ].copy()
+    if xi.duplicated(["R", "delta"]).any():
+        raise ValueError("primary Phase6 boundary data has duplicate (R, delta) rows")
+
+    joined = q0.merge(
+        xi, on=["R", "N", "delta", "epsilon_fraction"],
+        how="left", validate="one_to_one"
+    )
+    joined["tau0_num"] = 1.0 / joined["Gamma0_num"]
+    joined["Gamma0_reliable"] = joined["reliable"]
+    joined["xi_bnd"] = joined["xi_bnd_cosh"]
+    joined["fit_reliable"] = joined["fit_reliable"].fillna(False).astype(bool)
+    joined["converged"] = joined["converged"].fillna(False).astype(bool)
+    joined["included"] = (
+        joined["Gamma0_reliable"]
+        & joined["fit_reliable"]
+        & joined["converged"]
+        & np.isfinite(joined["Gamma0_num"])
+        & (joined["Gamma0_num"] > 0.0)
+        & np.isfinite(joined["xi_bnd"])
+        & (joined["xi_bnd"] > 0.0)
+    )
+
+    def exclusion_reason(row: pd.Series) -> str:
+        reasons: list[str] = []
+        if not bool(row["Gamma0_reliable"]):
+            reasons.append("Gamma0_unreliable")
+        if not bool(row["fit_reliable"]):
+            reasons.append("boundary_fit_unreliable_or_missing")
+        if not bool(row["converged"]):
+            reasons.append("boundary_not_converged_or_missing")
+        if not math.isfinite(float(row["Gamma0_num"])) or float(row["Gamma0_num"]) <= 0.0:
+            reasons.append("Gamma0_nonpositive_or_nonfinite")
+        xi_value = float(row["xi_bnd"]) if pd.notna(row["xi_bnd"]) else math.nan
+        if not math.isfinite(xi_value) or xi_value <= 0.0:
+            reasons.append("xi_bnd_nonpositive_or_missing")
+        return "ok" if not reasons else ";".join(reasons)
+
+    joined["exclusion_reason"] = joined.apply(exclusion_reason, axis=1)
+    points_columns = [
+        "R", "N", "delta", "Gamma0_num", "Gamma0_source", "tau0_num", "xi_bnd",
+        "epsilon_fraction", "fit_x_min", "fit_reliable", "converged", "Gamma0_reliable",
+        "included", "exclusion_reason",
+    ]
+    points = joined[points_columns].sort_values(["R", "delta"]).reset_index(drop=True)
+
+    summaries: list[dict[str, Any]] = []
+    for R in FULL_NUMERIC_R_VALUES:
+        group = points[(points["R"] == R) & points["included"]]
+        if len(group) < 2:
+            continue
+        fit = fit_dynamic_exponent(group["xi_bnd"], group["tau0_num"])
+        summaries.append(
+            {
+                "R": R,
+                "n_points": int(fit["n_points"]),
+                "delta_min": float(group["delta"].min()),
+                "delta_max": float(group["delta"].max()),
+                "z": float(fit["z"]),
+                "z_se": float(fit["z_se"]),
+                "z_ci_low": float(fit["z_ci_low"]),
+                "z_ci_high": float(fit["z_ci_high"]),
+                "r2": float(fit["r2"]),
+                "expected_z": 2.0,
+                "z_minus_2": float(fit["z"]) - 2.0,
+            }
+        )
+    summary_columns = [
+        "R", "n_points", "delta_min", "delta_max", "z", "z_se",
+        "z_ci_low", "z_ci_high", "r2", "expected_z", "z_minus_2",
+    ]
+    return points, pd.DataFrame(summaries, columns=summary_columns)
+
+
 def build_boundary_transmission(
     profiles: pd.DataFrame, xi_table: pd.DataFrame
 ) -> pd.DataFrame:
@@ -561,6 +683,152 @@ def make_result_c_figures(
     return paths
 
 
+def make_fully_numeric_z_figures(
+    figures_dir: Path,
+    q0_numeric: pd.DataFrame,
+    points: pd.DataFrame,
+    summary: pd.DataFrame,
+) -> list[Path]:
+    """Create dedicated main and diagnostic figures for the no-fallback test."""
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics_dir = figures_dir / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    q0 = q0_numeric.copy()
+    q0["reliable"] = _coerce_bool(q0["reliable"])
+    colors = dict(zip(FULL_NUMERIC_R_VALUES, plt.cm.viridis(np.linspace(0.05, 0.95, 5))))
+    markers = {6: "o", 12: "s", 24: "^", 48: "D", 96: "v"}
+    paths: list[Path] = []
+
+    fig, ax = plt.subplots(figsize=(7.2, 5.1), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = q0[q0["R"] == R].sort_values("delta")
+        ax.loglog(
+            group["delta"], group["Gamma0_num"], marker=markers[R],
+            color=colors[R], linestyle="none", label=f"R={R} numerical",
+        )
+        ax.loglog(
+            group["delta"], group["Gamma0_theory"], linestyle="--",
+            color=colors[R], lw=1.2,
+        )
+    ax.plot([], [], "k--", lw=1.2, label="Phase0 theory (same R)")
+    ax.set(xlabel=r"distance to spinodal $\delta$", ylabel=r"$\Gamma_{0}$",
+           title="Direct numerical q=0 relaxation rate")
+    ax.grid(which="both", alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, figures_dir / "01_q0_Gamma_numeric_vs_theory.png"))
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.9), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = q0[q0["R"] == R].sort_values("delta")
+        ax.semilogx(
+            group["delta"], group["Gamma0_num"] / group["Gamma0_theory"],
+            marker=markers[R], color=colors[R], label=f"R={R}",
+        )
+    ax.axhline(1.0, color="k", linestyle="--", lw=1.2)
+    ax.set(xlabel=r"$\delta$", ylabel=r"$\Gamma_{0,num}/\Gamma_{0,theory}$",
+           title="q=0 numerical consistency")
+    ax.grid(alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, figures_dir / "02_q0_Gamma_ratio.png"))
+
+    ncols, nrows = 3, 2
+    fig, axes = plt.subplots(nrows, ncols, figsize=(11.2, 7.2), constrained_layout=True, squeeze=False)
+    for ax, R in zip(axes.flat, FULL_NUMERIC_R_VALUES):
+        group = points[(points["R"] == R) & points["included"]].sort_values("xi_bnd")
+        fit_row = summary[summary["R"] == R]
+        ax.loglog(group["xi_bnd"], group["tau0_num"], "o", color=colors[R], label="numerical")
+        if len(group) >= 2 and len(fit_row) == 1:
+            fit = fit_dynamic_exponent(group["xi_bnd"], group["tau0_num"])
+            xline = np.logspace(np.log10(group["xi_bnd"].min()), np.log10(group["xi_bnd"].max()), 100)
+            ax.loglog(xline, float(fit["amplitude"]) * xline ** float(fit["z"]),
+                      color=colors[R], lw=1.4, label=rf"fit $z={fit['z']:.3f}$")
+            anchor = group.iloc[len(group) // 2]
+            ax.loglog(
+                xline, float(anchor["tau0_num"]) * (xline / float(anchor["xi_bnd"])) ** 2,
+                "k--", lw=1.0, label="slope 2",
+            )
+            row = fit_row.iloc[0]
+            ax.text(0.04, 0.96, rf"$R^2={row['r2']:.6f}$", transform=ax.transAxes,
+                    ha="left", va="top", fontsize=8)
+        ax.set(title=f"R={R}", xlabel=r"$\xi_{bnd}$", ylabel=r"$\tau_{0,num}$")
+        ax.grid(which="both", alpha=0.2); ax.legend(fontsize=7)
+    for ax in axes.flat[len(FULL_NUMERIC_R_VALUES):]:
+        ax.axis("off")
+    fig.suptitle(r"Fully numerical independent dynamic scaling: $\tau_0\sim\xi_{bnd}^{z}$")
+    paths.append(_save_figure(fig, figures_dir / "03_fully_numeric_dynamic_z.png"))
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.8), constrained_layout=True)
+    if not summary.empty:
+        ax.errorbar(summary["R"], summary["z"], yerr=summary["z_se"], fmt="o-", capsize=4)
+    ax.axhline(2.0, color="k", linestyle="--", label="z=2")
+    ax.set(xscale="log", xticks=list(FULL_NUMERIC_R_VALUES), xlabel="R", ylabel=r"$z_R$",
+           title="Fully numerical dynamic exponent by interaction range")
+    ax.get_xaxis().set_major_formatter(ScalarFormatter())
+    ax.grid(alpha=0.25); ax.legend()
+    paths.append(_save_figure(fig, figures_dir / "04_z_vs_R.png"))
+
+    fig, ax = plt.subplots(figsize=(7.1, 4.8), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = q0[q0["R"] == R].sort_values("delta")
+        ax.semilogx(group["delta"], group["lambda_fit_r2"], "o-", color=colors[R], label=f"R={R}")
+    ax.axhline(0.999, color="k", linestyle="--", lw=1)
+    ax.set(xlabel=r"$\delta$", ylabel=r"$R^2$ of $\lambda$ fit", title="q=0 lambda-fit quality")
+    ax.grid(alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, diagnostics_dir / "q0_lambda_fit_r2.png"))
+
+    fig, ax = plt.subplots(figsize=(7.1, 4.8), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = q0[q0["R"] == R].sort_values("delta")
+        ax.loglog(group["delta"], group["method_B_C_relative_difference"], "o-",
+                  color=colors[R], label=f"R={R}")
+    ax.set(xlabel=r"$\delta$", ylabel="relative method B/C difference",
+           title=r"$\Gamma_{from\ lambda}$ vs $\Gamma_{logfit}$")
+    ax.grid(which="both", alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, diagnostics_dir / "q0_Gamma_method_difference.png"))
+
+    fig, ax = plt.subplots(figsize=(7.1, 4.8), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = q0[q0["R"] == R].sort_values("delta")
+        ax.loglog(group["delta"], group["Gamma_relative_error"], "o-",
+                  color=colors[R], label=f"R={R}")
+    ax.set(xlabel=r"$\delta$", ylabel="relative error vs Phase0 theory",
+           title="Numerical q=0 validation")
+    ax.grid(which="both", alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, diagnostics_dir / "q0_relative_error_vs_delta.png"))
+
+    fig, ax = plt.subplots(figsize=(7.1, 4.8), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        source_rows = q0[q0["R"] == R]
+        if source_rows.empty:
+            continue
+        source_file = Path(str(source_rows["source_file"].iloc[0]))
+        if not source_file.is_absolute():
+            source_file = Path.cwd() / source_file
+        time_path = source_file.parent / "timeseries" / "delta_1e-05_mode_0.csv"
+        if not time_path.is_file():
+            continue
+        time_series = pd.read_csv(time_path)
+        ax.semilogy(time_series["t"], time_series["A_q_over_A0"].abs(),
+                    color=colors[R], label=f"R={R}")
+    ax.set(xlabel="time t", ylabel=r"$|A_0(t)/A_0(0)|$",
+           title=r"Representative q=0 amplitude decay ($\delta=10^{-5}$)")
+    ax.grid(alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, diagnostics_dir / "q0_amplitude_decay_representative.png"))
+
+    fig, ax = plt.subplots(figsize=(7.1, 4.8), constrained_layout=True)
+    for _, row in summary.iterrows():
+        R = int(row["R"])
+        group = points[(points["R"] == R) & points["included"]]
+        fit = fit_dynamic_exponent(group["xi_bnd"], group["tau0_num"])
+        residual = np.log(group["tau0_num"]) - np.log(
+            float(fit["amplitude"]) * group["xi_bnd"] ** float(fit["z"])
+        )
+        ax.semilogx(group["delta"], residual, "o-", color=colors[R], label=f"R={R}")
+    ax.axhline(0.0, color="k", linestyle="--", lw=1)
+    ax.set(xlabel=r"$\delta$", ylabel="log-fit residual", title="Fully numerical dynamic-z residual")
+    ax.grid(alpha=0.25); ax.legend(fontsize=8, ncol=2)
+    paths.append(_save_figure(fig, diagnostics_dir / "dynamic_z_residual.png"))
+    return paths
+
+
 def _representative_phase6(xi_table: pd.DataFrame) -> tuple[int, float, pd.DataFrame]:
     frame = xi_table.copy()
     for column in ("primary_epsilon", "converged", "fit_reliable"):
@@ -709,9 +977,26 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
     z_points, z_summary = build_dynamic_z_tables(
         xi, args.phase12_dir, primary_delta_max=args.primary_delta_max
     )
+    fully_numeric_points = pd.DataFrame()
+    fully_numeric_summary = pd.DataFrame()
+    q0_numeric = pd.DataFrame()
+    fully_numeric_figure_paths: list[Path] = []
+    fully_numeric_requested = args.fully_numeric_only or args.q0_numeric_master.is_file()
+    if fully_numeric_requested:
+        if not args.q0_numeric_master.is_file():
+            raise FileNotFoundError(
+                "incomplete: numerical Gamma0 missing; expected "
+                f"{args.q0_numeric_master}"
+            )
+        q0_numeric = pd.read_csv(args.q0_numeric_master)
+        fully_numeric_points, fully_numeric_summary = build_fully_numeric_dynamic_z_tables(
+            xi, q0_numeric
+        )
     transmission = build_boundary_transmission(profiles, xi)
 
     table_paths = {
+        "B_combined_modes": output_root / "resultB_final_combined_mode_results.csv",
+        "B_combined_collapse": output_root / "resultB_final_combined_collapse.csv",
         "B_precision": output_root / "resultB_precision_diagnostic.csv",
         "C_epsilon": output_root / "resultC_epsilon_robustness.csv",
         "C_window": output_root / "resultC_fitwindow_robustness.csv",
@@ -719,11 +1004,22 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         "C_z_summary": output_root / "resultC_dynamic_z_summary.csv",
         "D_transmission": output_root / "resultD_boundary_transmission.csv",
     }
+    if fully_numeric_requested:
+        table_paths.update(
+            {
+                "C_z_points_fully_numeric": output_root / "resultC_dynamic_z_points_fully_numeric.csv",
+                "C_z_summary_fully_numeric": output_root / "resultC_dynamic_z_summary_fully_numeric.csv",
+            }
+        )
     for frame, key in (
+        (modes, "B_combined_modes"), (b_collapse, "B_combined_collapse"),
         (b_precision, "B_precision"), (epsilon, "C_epsilon"), (windows, "C_window"),
         (z_points, "C_z_points"), (z_summary, "C_z_summary"), (transmission, "D_transmission"),
     ):
         frame.to_csv(table_paths[key], index=False)
+    if fully_numeric_requested:
+        fully_numeric_points.to_csv(table_paths["C_z_points_fully_numeric"], index=False)
+        fully_numeric_summary.to_csv(table_paths["C_z_summary_fully_numeric"], index=False)
 
     figure_paths = []
     figure_paths.extend(make_result_b_figures(figures_dir, b_precision, b_collapse))
@@ -734,6 +1030,11 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         diagnostics_dir, b_precision, epsilon, windows, z_points, z_summary,
         transmission, profiles, xi,
     )
+    if fully_numeric_requested:
+        fully_numeric_figure_paths = make_fully_numeric_z_figures(
+            figures_dir / "fully_numeric_z", q0_numeric,
+            fully_numeric_points, fully_numeric_summary,
+        )
 
     reliable_epsilon = epsilon[epsilon["fit_reliable"] & epsilon["converged"]]
     critical_epsilon = reliable_epsilon[
@@ -753,6 +1054,74 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
     critical_windows = reliable_windows[
         reliable_windows["delta"] <= args.primary_delta_max * (1.0 + 1e-12)
     ]
+    refinement_rows = modes[modes["data_source"] == "poster_B_refinement"]
+    refinement_detected = not refinement_rows.empty
+    precision_target_met = bool(b_precision["precision_target_met"].any())
+    fully_numeric_validation: dict[str, Any] = {
+        "status": "not requested",
+        "fully_numeric": False,
+    }
+    if fully_numeric_requested:
+        expected_pairs = {
+            (R, delta) for R in FULL_NUMERIC_R_VALUES for delta in FULL_NUMERIC_DELTAS
+        }
+        actual_pairs = {
+            (int(row.R), float(row.delta))
+            for row in q0_numeric.itertuples()
+            if int(row.R) in FULL_NUMERIC_R_VALUES
+            and any(math.isclose(float(row.delta), value, rel_tol=1e-12, abs_tol=1e-15)
+                    for value in FULL_NUMERIC_DELTAS)
+        }
+        missing_pairs = sorted(expected_pairs - actual_pairs)
+        invalid_sources = sorted(
+            set(q0_numeric["Gamma0_source"].astype(str)) - {FULL_NUMERIC_GAMMA_SOURCE}
+        )
+        excluded = fully_numeric_points[~fully_numeric_points["included"]]
+        complete_fits = (
+            set(fully_numeric_summary["R"].astype(int)) == set(FULL_NUMERIC_R_VALUES)
+            and bool((fully_numeric_summary["n_points"] == 4).all())
+        )
+        completed = not missing_pairs and not invalid_sources and excluded.empty and complete_fits
+        campaign_summary_path = args.q0_numeric_master.parent / "q0_full_numeric_validation_summary.json"
+        campaign_summary = (
+            json.loads(campaign_summary_path.read_text(encoding="utf-8"))
+            if campaign_summary_path.is_file() else {}
+        )
+        z_consistency = {
+            str(int(row.R)): bool(float(row.z_ci_low) <= 2.0 <= float(row.z_ci_high))
+            for row in fully_numeric_summary.itertuples()
+        }
+        fully_numeric_validation = {
+            "status": (
+                "fully numerical independent validation completed"
+                if completed else "incomplete: numerical Gamma0 missing or unreliable"
+            ),
+            "fully_numeric": completed,
+            "Gamma0_definition": "Gamma_from_lambda = -ln(abs(lambda_fit))",
+            "tau0_definition": "tau0_num = 1/Gamma0_num",
+            "xi_definition": "independently fitted Phase6 real-space boundary response xi_bnd_cosh",
+            "xi_dyn_used": False,
+            "Phase0_Gamma_fallback_used": False,
+            "Gamma0_source_required": FULL_NUMERIC_GAMMA_SOURCE,
+            "missing_conditions": [f"R={R},delta={delta:g}" for R, delta in missing_pairs],
+            "invalid_sources": invalid_sources,
+            "excluded_conditions": excluded[
+                ["R", "delta", "exclusion_reason"]
+            ].to_dict(orient="records"),
+            "per_R_z": fully_numeric_summary.to_dict(orient="records"),
+            "z_95pct_CI_contains_2": z_consistency,
+            "all_R_CI_contain_2": bool(z_consistency) and all(z_consistency.values()),
+            "q0_campaign_summary": str(campaign_summary_path),
+            "per_R_provenance": campaign_summary.get("per_R_provenance", {}),
+            "max_Gamma0_relative_error": (
+                float(q0_numeric["Gamma_relative_error"].abs().max())
+                if "Gamma_relative_error" in q0_numeric else None
+            ),
+            "max_Gamma_from_lambda_minus_Gamma_logfit": (
+                float((q0_numeric["Gamma0_num"] - q0_numeric["Gamma0_logfit"]).abs().max())
+                if "Gamma0_logfit" in q0_numeric else None
+            ),
+        }
     validation = {
         "script_version": SCRIPT_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -761,12 +1130,28 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         "pandas_version": pd.__version__, "scipy_version": scipy.__version__,
         "analysis_only": True, "phase6_new_simulation_performed": False,
         "B": {
-            "existing_or_combined_precision_target_met": bool(b_precision["precision_target_met"].any()),
+            "integration_status": (
+                "refinement integrated; fixed X/D precision target still unmet"
+                if refinement_detected and not precision_target_met
+                else "refinement integrated; fixed precision target met"
+                if refinement_detected
+                else "existing data only; refinement has not been transferred"
+            ),
+            "refinement_data_detected": refinement_detected,
+            "refinement_R": sorted(int(value) for value in refinement_rows["R"].unique()),
+            "refinement_matched_distances": sorted(float(value) for value in refinement_rows["matched_distance"].unique()),
+            "refinement_M": sorted(int(value) for value in refinement_rows["M_total"].unique()),
+            "combined_mode_rows": int(len(modes)),
+            "combined_conditions": int(len(b_precision)),
+            "precision_target_met_after_available_data": precision_target_met,
             "maximum_X": float(b_precision["X_max"].max()),
             "maximum_D_over_sigma_D": float(b_precision["D_over_sigma_D"].max()),
-            "refinement_required": not bool(b_precision["precision_target_met"].any()),
+            "additional_simulation_needed_to_reach_fixed_target": not precision_target_met,
             "fixed_target": "X_max>=0.4 and D/SE(D)>=2; qR<=0.35",
-            "recommended_first_refinement": "R=24; s=0.001,0.002,0.003,0.005; M=16384",
+            "recommended_first_refinement": (
+                None if refinement_detected
+                else "R=24; s=0.001,0.002,0.003,0.005; M=16384"
+            ),
         },
         "C_epsilon": {
             "representative_max_absolute_relative_change": float(rep_eps_rows["relative_difference"].abs().max()),
@@ -779,17 +1164,22 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
             "all_reliable_max_absolute_relative_change": float((reliable_windows["relative_ratio"] - 1.0).abs().max()),
         },
         "C_dynamic_z": z_summary.to_dict(orient="records"),
+        "C_dynamic_z_fully_numeric": fully_numeric_validation,
         "D_representative": d_selection,
         "scientific_constraints": {
             "fit_windows_selected_from_result": False,
             "xi_dyn_used_in_independent_z_fit": False,
+            "Phase0_Gamma_fallback_used_in_fully_numeric_z_fit": False,
             "finite_R_delta_ps_wording": "operational microscopic pseudospinodal-like crossover",
             "unreliable_D_curves_excluded_from_main_figures": True,
         },
     }
     validation_path = output_root / "poster_final_validation_summary.json"
     validation_path.write_text(json.dumps(validation, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return [*table_paths.values(), validation_path, *figure_paths, *diagnostic_paths]
+    return [
+        *table_paths.values(), validation_path, *figure_paths, *diagnostic_paths,
+        *fully_numeric_figure_paths,
+    ]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -800,6 +1190,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pseudospinodal-root", type=Path, default=Path("results/runs/phase5_R_sweep"))
     parser.add_argument("--phase6-dir", type=Path, default=Path("results/runs/poster_ABCD/phase6_boundary"))
     parser.add_argument("--phase12-dir", type=Path, default=Path("results/runs/phase12_B2_R12"))
+    parser.add_argument(
+        "--q0-numeric-master", type=Path,
+        default=Path("results/runs/poster_ABCD/q0_full_numeric_validation/q0_numeric_all_5R.csv"),
+    )
+    parser.add_argument(
+        "--fully-numeric-only", action="store_true",
+        help="require the five-R numerical q=0 master and forbid theory fallback",
+    )
     parser.add_argument("--epsilon-fraction", type=float, default=PRIMARY_EPSILON)
     parser.add_argument("--T-obs", type=int, default=50)
     parser.add_argument("--qR-max", type=float, default=PRIMARY_QR_MAX)

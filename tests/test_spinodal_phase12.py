@@ -21,6 +21,7 @@ from spinodal_phase12 import (
     build_phase12_tasks,
     deterministic_closure_step,
     ensure_phase0_reference,
+    fit_lambda_origin,
     simulate_deterministic_mode,
 )
 from spinodal_phase12_mpi import aggregate_task_payloads, run_task_subset
@@ -176,6 +177,19 @@ class SpinodalPhase12Tests(unittest.TestCase):
             self.assertTrue((phase0_dir / "phase0_summary.json").exists())
             self.assertTrue((phase0_dir / "phase0_delta_table.csv").exists())
             self.assertAlmostEqual(float(reference.delta_table.iloc[0]["delta"]), 1e-3)
+
+    def test_10_q0_kernel_hat_is_exactly_one(self) -> None:
+        result = simulate_deterministic_mode(self.make_task(mode=0))
+        self.assertEqual(float(result.metrics["kernel_hat"]), 1.0)
+
+    def test_11_synthetic_geometric_decay_recovers_gamma(self) -> None:
+        expected_lambda = 0.973
+        amplitude = 0.2 * expected_lambda ** np.arange(31)
+        fitted, r2, count = fit_lambda_origin(amplitude, 0, 20)
+        self.assertAlmostEqual(fitted, expected_lambda, places=14)
+        self.assertAlmostEqual(-np.log(abs(fitted)), -np.log(expected_lambda), places=14)
+        self.assertAlmostEqual(r2, 1.0, places=14)
+        self.assertEqual(count, 20)
 
 
 if __name__ == "__main__":

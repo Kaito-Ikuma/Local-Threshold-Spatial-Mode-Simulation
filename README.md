@@ -511,7 +511,7 @@ qsub -v POSTER_B_R=48,POSTER_B_M=16384 \
   scripts/run_phase5_squid_poster_B_refinement.sh
 ```
 
-SQUID出力をlocalの `results/runs/poster_ABCD/B_refinement/` へ転送後、local scriptを再実行すると既存データと統合され、同一条件には大きい `M` の結果が使われます。
+SQUID出力をlocalの `results/runs/poster_ABCD/B_refinement/` へ転送後、local scriptを再実行すると既存データと統合され、同一条件には大きい `M` の結果が使われます。統合済みの行は `resultB_final_combined_mode_results.csv`、再計算したcollapseは `resultB_final_combined_collapse.csv`、条件ごとの採用元と精度は `resultB_precision_diagnostic.csv` で確認できます。元の `resultB_micro_*.csv` は入力の再現性を保つため上書きしません。
 
 追加解析は以下を出力します。
 
@@ -522,6 +522,16 @@ SQUID出力をlocalの `results/runs/poster_ABCD/B_refinement/` へ転送後、l
 - Result D: boundary layer、境界透過率 `T_bnd`、`x>=2R` のbulk exponential decayの分離
 
 ポスター本文候補は `results/runs/poster_ABCD/poster_final_figures/`、全条件を含む診断図はその `diagnostics/` に保存します。A/Bはfinite-R microscopic dynamics、C/Dはdeterministic Gaussian closureです。独立z testでは `xi_dyn=sqrt(D/Gamma0)` を使わず、境界profileからfitした `xi_bnd` を使います。
+
+fully numerical independent z validation は、`R=6,12,24,48,96` の全てで periodic deterministic Gaussian closure の `q=0` 緩和を数値測定し、Phase6 の実空間境界応答から独立に得た `xi_bnd` と結合します。新規計算は `R=6,24,48,96`、`delta=1e-5,3e-5,1e-4,3e-4`、`mode_index=0`、`epsilon_fraction=0.05` の16条件です。`R=12` は既存の `results/runs/phase12_B2_R12/phase12_mode_results.csv` を再利用します。
+
+```bash
+scripts/run_phase12_q0_full_numeric_local.sh
+```
+
+各 `R` の `N` は `results/runs/poster_ABCD/phase6_boundary/` のCSVとsummaryから読み、両者の一致を検証します。`Gamma0_num` は既存 Phase1 estimator の `Gamma_from_lambda=-ln|lambda_fit|`、`tau0_num=1/Gamma0_num` です。空間量は `epsilon_fraction=0.05`、固定窓 `x_min=2R`、`converged=True`、`fit_reliable=True` の `xi_bnd_cosh` だけを使います。`xi_dyn=sqrt(D/Gamma0)` および Phase0 theory Gamma fallback は、この z fit には使いません。
+
+raw data と5R masterは `results/runs/poster_ABCD/q0_full_numeric_validation/` に、fully numerical の表は `resultC_dynamic_z_points_fully_numeric.csv` と `resultC_dynamic_z_summary_fully_numeric.csv` に保存します。主図4枚と数値診断図は `results/runs/poster_ABCD/poster_final_figures/fully_numeric_z/` にまとまります。1点でも numerical `Gamma0` が欠ける、非numerical sourceが混ざる、または固定reliability条件から外れる場合は completed とせず、summaryに `incomplete: numerical Gamma0 missing or unreliable` と記録します。
 
 ## 実行例
 
