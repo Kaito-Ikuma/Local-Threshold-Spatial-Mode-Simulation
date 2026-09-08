@@ -533,6 +533,8 @@ scripts/run_phase12_q0_full_numeric_local.sh
 
 raw data と5R masterは `results/runs/poster_ABCD/q0_full_numeric_validation/` に、fully numerical の表は `resultC_dynamic_z_points_fully_numeric.csv` と `resultC_dynamic_z_summary_fully_numeric.csv` に保存します。主図4枚と数値診断図は `results/runs/poster_ABCD/poster_final_figures/fully_numeric_z/` にまとまります。1点でも numerical `Gamma0` が欠ける、非numerical sourceが混ざる、または固定reliability条件から外れる場合は completed とせず、summaryに `incomplete: numerical Gamma0 missing or unreliable` と記録します。
 
+Rをまたぐポスター主図には、理論prefactor `kappa_R=a^2(R+1)(2R+1)/12` を除いた `xi_bnd/sqrt(kappa_R)` を使用します。全20点を1軸にまとめた `03_fully_numeric_dynamic_z_combined.png` は `tau0_num=(xi_bnd/sqrt(kappa_R))^2` を直接比較し、5-panel版 `03_fully_numeric_dynamic_z.png` は詳細確認用として残します。raw座標のR依存offsetは `03_fully_numeric_dynamic_z_combined_raw.png`、変換後の各点とcollapse ratioは `fully_numeric_dynamic_z_combined_points.csv`、combined/asymptotic fitと回帰CIの解釈は `fully_numeric_dynamic_z_combined_summary.json` に保存します。この「independent」は同じdeterministic Gaussian closure内のq=0時間緩和と境界誘起空間長という独立なobservable/protocolを意味します。
+
 ## 実行例
 
 軽量な動作確認:

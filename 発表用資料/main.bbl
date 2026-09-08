@@ -1,0 +1,245 @@
+% $ biblatex auxiliary file $
+% $ biblatex bbl format version 3.2 $
+% Do not modify the above lines!
+%
+% This is an auxiliary file used by the 'biblatex' package.
+% This file may safely be deleted. It will be recreated by
+% biber as required.
+%
+\begingroup
+\makeatletter
+\@ifundefined{ver@biblatex.sty}
+  {\@latex@error
+     {Missing 'biblatex' package}
+     {The bibliography requires the 'biblatex' package.}
+      \aftergroup\endinput}
+  {}
+\endgroup
+
+
+\refsection{0}
+  \datalist[entry]{none/global//global/global}
+    \entry{mori2010}{article}{}
+      \name{author}{3}{}{%
+        {{hash=58a73ee76415f5ef423efdd5df86d225}{%
+           family={Mori},
+           familyi={M\bibinitperiod},
+           given={Takashi},
+           giveni={T\bibinitperiod}}}%
+        {{hash=80f239b416dd83ebb7983afacbfa77a6}{%
+           family={Miyashita},
+           familyi={M\bibinitperiod},
+           given={Seiji},
+           giveni={S\bibinitperiod}}}%
+        {{hash=053e654201429fa69d5ee44911ba5176}{%
+           family={Rikvold},
+           familyi={R\bibinitperiod},
+           given={Per\bibnamedelima Arne},
+           giveni={P\bibinitperiod\bibinitdelim A\bibinitperiod}}}%
+      }
+      \strng{namehash}{97384e8c793c25909f667c40bc2b5e84}
+      \strng{fullhash}{97384e8c793c25909f667c40bc2b5e84}
+      \strng{bibnamehash}{97384e8c793c25909f667c40bc2b5e84}
+      \strng{authorbibnamehash}{97384e8c793c25909f667c40bc2b5e84}
+      \strng{authornamehash}{97384e8c793c25909f667c40bc2b5e84}
+      \strng{authorfullhash}{97384e8c793c25909f667c40bc2b5e84}
+      \field{sortinit}{1}
+      \field{sortinithash}{4f6aaa89bab872aa0999fec09ff8e98a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Physical Review E}
+      \field{number}{1}
+      \field{title}{Asymptotic Forms and Scaling Properties of the Relaxation Time near Threshold Points in Spinodal-Type Dynamical Phase Transitions}
+      \field{volume}{81}
+      \field{year}{2010}
+      \field{pages}{011135}
+      \range{pages}{1}
+      \verb{doi}
+      \verb 10.1103/PhysRevE.81.011135
+      \endverb
+    \endentry
+    \entry{hohenberg1977}{article}{}
+      \name{author}{2}{}{%
+        {{hash=0c6d54ee15e7820c64218de54ce7e1b7}{%
+           family={Hohenberg},
+           familyi={H\bibinitperiod},
+           given={Pierre\bibnamedelima C.},
+           giveni={P\bibinitperiod\bibinitdelim C\bibinitperiod}}}%
+        {{hash=9f6cfc536e75ad39b4d7f673ce874f0d}{%
+           family={Halperin},
+           familyi={H\bibinitperiod},
+           given={Bertrand\bibnamedelima I.},
+           giveni={B\bibinitperiod\bibinitdelim I\bibinitperiod}}}%
+      }
+      \strng{namehash}{e524e2d8e333085f77f9b7935045bcce}
+      \strng{fullhash}{e524e2d8e333085f77f9b7935045bcce}
+      \strng{bibnamehash}{e524e2d8e333085f77f9b7935045bcce}
+      \strng{authorbibnamehash}{e524e2d8e333085f77f9b7935045bcce}
+      \strng{authornamehash}{e524e2d8e333085f77f9b7935045bcce}
+      \strng{authorfullhash}{e524e2d8e333085f77f9b7935045bcce}
+      \field{sortinit}{2}
+      \field{sortinithash}{8b555b3791beccb63322c22f3320aa9a}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Reviews of Modern Physics}
+      \field{number}{3}
+      \field{title}{Theory of Dynamic Critical Phenomena}
+      \field{volume}{49}
+      \field{year}{1977}
+      \field{pages}{435\bibrangedash 479}
+      \range{pages}{45}
+      \verb{doi}
+      \verb 10.1103/RevModPhys.49.435
+      \endverb
+    \endentry
+    \entry{wegner1972}{article}{}
+      \name{author}{1}{}{%
+        {{hash=068649ef5b0b9a4bfc324c64cbfb6723}{%
+           family={Wegner},
+           familyi={W\bibinitperiod},
+           given={Franz\bibnamedelima J.},
+           giveni={F\bibinitperiod\bibinitdelim J\bibinitperiod}}}%
+      }
+      \strng{namehash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \strng{fullhash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \strng{bibnamehash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \strng{authorbibnamehash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \strng{authornamehash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \strng{authorfullhash}{068649ef5b0b9a4bfc324c64cbfb6723}
+      \field{sortinit}{3}
+      \field{sortinithash}{ad6fe7482ffbd7b9f99c9e8b5dccd3d7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{Physical Review B}
+      \field{number}{11}
+      \field{title}{Corrections to Scaling Laws}
+      \field{volume}{5}
+      \field{year}{1972}
+      \field{pages}{4529\bibrangedash 4536}
+      \range{pages}{8}
+      \verb{doi}
+      \verb 10.1103/PhysRevB.5.4529
+      \endverb
+    \endentry
+    \entry{diehl1997}{article}{}
+      \name{author}{1}{}{%
+        {{hash=765c76b3019966a06f0264cd235a9c5b}{%
+           family={Diehl},
+           familyi={D\bibinitperiod},
+           given={H.\bibnamedelimi W.},
+           giveni={H\bibinitperiod\bibinitdelim W\bibinitperiod}}}%
+      }
+      \strng{namehash}{765c76b3019966a06f0264cd235a9c5b}
+      \strng{fullhash}{765c76b3019966a06f0264cd235a9c5b}
+      \strng{bibnamehash}{765c76b3019966a06f0264cd235a9c5b}
+      \strng{authorbibnamehash}{765c76b3019966a06f0264cd235a9c5b}
+      \strng{authornamehash}{765c76b3019966a06f0264cd235a9c5b}
+      \strng{authorfullhash}{765c76b3019966a06f0264cd235a9c5b}
+      \field{sortinit}{4}
+      \field{sortinithash}{9381316451d1b9788675a07e972a12a7}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{journaltitle}{International Journal of Modern Physics B}
+      \field{number}{30}
+      \field{title}{The Theory of Boundary Critical Phenomena}
+      \field{volume}{11}
+      \field{year}{1997}
+      \field{pages}{3503\bibrangedash 3523}
+      \range{pages}{21}
+      \verb{doi}
+      \verb 10.1142/S0217979297001751
+      \endverb
+    \endentry
+    \entry{poster2026}{misc}{}
+      \name{author}{2}{}{%
+        {{hash=4f45bcbb12305a3121732ad6853e718a}{%
+           family={海斗},
+           familyi={海\bibinitperiod},
+           given={伊熊},
+           giveni={伊\bibinitperiod}}}%
+        {{hash=1c4a35a25d05ef1f46858cd4765c7400}{%
+           family={元},
+           familyi={元\bibinitperiod},
+           given={吉野},
+           giveni={吉\bibinitperiod}}}%
+      }
+      \strng{namehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{fullhash}{83ee63e0219b43e297e422d347340b72}
+      \strng{bibnamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authorbibnamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authornamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authorfullhash}{83ee63e0219b43e297e422d347340b72}
+      \field{extraname}{1}
+      \field{sortinit}{5}
+      \field{sortinithash}{20e9b4b0b173788c5dace24730f47d8c}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{日本物理学会2026年秋季大会ポスター（2026年秋学会ポスター\_v2.pptx）}
+      \field{note}{本補助資料の記号・説明順の基準資料}
+      \field{title}{空間自由度を導入した避難意思決定モデルの解析}
+      \field{year}{2026}
+      \true{nocite}
+    \endentry
+    \entry{proceedings2026}{misc}{}
+      \name{author}{2}{}{%
+        {{hash=4f45bcbb12305a3121732ad6853e718a}{%
+           family={海斗},
+           familyi={海\bibinitperiod},
+           given={伊熊},
+           giveni={伊\bibinitperiod}}}%
+        {{hash=1c4a35a25d05ef1f46858cd4765c7400}{%
+           family={元},
+           familyi={元\bibinitperiod},
+           given={吉野},
+           giveni={吉\bibinitperiod}}}%
+      }
+      \strng{namehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{fullhash}{83ee63e0219b43e297e422d347340b72}
+      \strng{bibnamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authorbibnamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authornamehash}{83ee63e0219b43e297e422d347340b72}
+      \strng{authorfullhash}{83ee63e0219b43e297e422d347340b72}
+      \field{extraname}{2}
+      \field{sortinit}{6}
+      \field{sortinithash}{b33bc299efb3c36abec520a4c896a66d}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{howpublished}{日本物理学会2026年秋季大会 学会予稿}
+      \field{note}{モデル式および線形化式 Eq. (1)--(3)}
+      \field{title}{空間自由度を導入した避難意思決定モデルの解析}
+      \field{year}{2026}
+      \true{nocite}
+    \endentry
+    \entry{repository2026}{misc}{}
+      \name{author}{1}{}{%
+        {{hash=a95a5e34dc415fb17afa3226b6afa23b}{%
+           family={Ikuma},
+           familyi={I\bibinitperiod},
+           given={Kaito},
+           giveni={K\bibinitperiod}}}%
+      }
+      \strng{namehash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \strng{fullhash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \strng{bibnamehash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \strng{authorbibnamehash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \strng{authornamehash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \strng{authorfullhash}{a95a5e34dc415fb17afa3226b6afa23b}
+      \field{sortinit}{7}
+      \field{sortinithash}{108d0be1b1bee9773a1173443802c0a3}
+      \field{labelnamesource}{author}
+      \field{labeltitlesource}{title}
+      \field{note}{参照 commit: 0cd8a6c（検証時）}
+      \field{title}{Local-Threshold-Spatial-Mode-Simulation}
+      \field{year}{2026}
+      \true{nocite}
+      \verb{urlraw}
+      \verb https://github.com/Kaito-Ikuma/Local-Threshold-Spatial-Mode-Simulation
+      \endverb
+      \verb{url}
+      \verb https://github.com/Kaito-Ikuma/Local-Threshold-Spatial-Mode-Simulation
+      \endverb
+    \endentry
+  \enddatalist
+\endrefsection
+\endinput
+

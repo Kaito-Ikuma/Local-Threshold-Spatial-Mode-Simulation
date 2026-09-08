@@ -16,9 +16,11 @@ from spinodal_poster_final_validation import (
     _load_combined_micro_modes,
     build_epsilon_robustness,
     build_fitwindow_robustness,
+    build_fully_numeric_combined_analysis,
     build_fully_numeric_dynamic_z_tables,
     bulk_normalized_profile,
     fit_dynamic_exponent,
+    make_fully_numeric_combined_figures,
 )
 
 
@@ -30,6 +32,7 @@ class PosterFinalValidationTests(unittest.TestCase):
         q0_rows = []
         xi_rows = []
         for R, N in n_map.items():
+            kappa = (R + 1) * (2 * R + 1) / 12.0
             for delta in delta_values:
                 q0_rows.append(
                     {
@@ -45,7 +48,7 @@ class PosterFinalValidationTests(unittest.TestCase):
                         "R": R, "N": N, "delta": delta,
                         "epsilon_fraction": 0.05,
                         "boundary_type": "ghost_dirichlet",
-                        "xi_bnd_cosh": (1.0 + R / 10.0) * delta**-0.25,
+                        "xi_bnd_cosh": np.sqrt(kappa / 0.7) * delta**-0.25,
                         "fit_x_min": 2.0 * R,
                         "fit_reliable": True,
                         "converged": True,
@@ -157,6 +160,48 @@ class PosterFinalValidationTests(unittest.TestCase):
         self.assertEqual(set(summary["R"]), {6, 12, 24, 48, 96})
         self.assertTrue((summary["n_points"] == 4).all())
         np.testing.assert_allclose(summary["z"], 2.0, rtol=0.0, atol=1e-12)
+
+    def test_normalized_combined_collapse_uses_kappa_and_all_20_points(self) -> None:
+        xi, q0 = self.synthetic_fully_numeric_inputs()
+        points, _ = build_fully_numeric_dynamic_z_tables(xi, q0)
+        combined, summary = build_fully_numeric_combined_analysis(
+            points, lattice_spacing=1.0
+        )
+        self.assertEqual(len(combined), 20)
+        self.assertEqual(set(combined["R"]), {6, 12, 24, 48, 96})
+        r12 = combined[combined["R"] == 12].iloc[0]
+        self.assertAlmostEqual(float(r12["kappa_R"]), 27.083333333333332)
+        self.assertAlmostEqual(
+            float(r12["xi_scaled"]),
+            float(r12["xi_bnd"]) / np.sqrt(float(r12["kappa_R"])),
+        )
+        self.assertTrue(np.isfinite(combined["collapse_ratio"]).all())
+        self.assertTrue((combined["collapse_ratio"] > 0.0).all())
+        np.testing.assert_allclose(combined["collapse_ratio"], 1.0, atol=1e-12)
+        self.assertAlmostEqual(float(summary["combined_fit_all_20"]["z"]), 2.0, places=12)
+        self.assertTrue(summary["all_20_points_present"])
+        self.assertTrue(summary["all_20_points_passed_reliability_criteria"])
+        self.assertEqual(summary["Gamma0_source"], "deterministic q=0 numerical")
+
+    def test_combined_figure_filenames_are_generated(self) -> None:
+        xi, q0 = self.synthetic_fully_numeric_inputs()
+        points, _ = build_fully_numeric_dynamic_z_tables(xi, q0)
+        combined, summary = build_fully_numeric_combined_analysis(
+            points, lattice_spacing=1.0
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = make_fully_numeric_combined_figures(
+                Path(temporary), combined, summary
+            )
+            names = {path.name for path in paths}
+            self.assertEqual(
+                names,
+                {
+                    "03_fully_numeric_dynamic_z_combined.png",
+                    "03_fully_numeric_dynamic_z_combined_raw.png",
+                },
+            )
+            self.assertTrue(all(path.is_file() for path in paths))
 
 
 if __name__ == "__main__":

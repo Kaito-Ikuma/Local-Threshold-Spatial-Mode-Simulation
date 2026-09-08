@@ -31,10 +31,11 @@ from matplotlib.ticker import ScalarFormatter
 from scipy.stats import t as student_t
 
 from spinodal_poster_abcd import fit_measured_dispersion, load_pseudospinodal
+from spinodal_phase0 import kappa_R_theory
 from spinodal_phase34 import coefficient_of_determination, fit_power_law
 
 
-SCRIPT_VERSION = "2026.09.04-poster-final-validation-v2"
+SCRIPT_VERSION = "2026.09.08-poster-final-validation-v3"
 BOUNDARY_TYPES = (
     "ghost_dirichlet",
     "open_fixed_denominator",
@@ -72,6 +73,20 @@ def _git_sha() -> str | None:
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        return float(value) if math.isfinite(float(value)) else None
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
 
 
 def fit_dynamic_exponent(
@@ -506,6 +521,163 @@ def build_fully_numeric_dynamic_z_tables(
     return points, pd.DataFrame(summaries, columns=summary_columns)
 
 
+def infer_q0_lattice_spacing(q0_numeric: pd.DataFrame) -> float:
+    """Read ``a`` from the Phase12 numerical sources and require one value."""
+    if "a" in q0_numeric.columns:
+        values = q0_numeric["a"].dropna().to_numpy(dtype=float)
+    else:
+        _require_columns(q0_numeric, ["source_file"], "q0_numeric_all_5R.csv")
+        collected: list[float] = []
+        for source_text in sorted(set(q0_numeric["source_file"].astype(str))):
+            source = Path(source_text)
+            if not source.is_absolute():
+                source = Path.cwd() / source
+            if not source.is_file():
+                raise FileNotFoundError(f"cannot read lattice spacing from {source}")
+            source_table = pd.read_csv(source, usecols=["a"])
+            collected.extend(source_table["a"].dropna().to_numpy(dtype=float).tolist())
+        values = np.asarray(collected, dtype=float)
+    unique = np.unique(np.round(values, decimals=14))
+    if len(unique) != 1 or not math.isfinite(float(unique[0])) or float(unique[0]) <= 0.0:
+        raise ValueError(f"expected one positive finite lattice spacing, found {unique.tolist()}")
+    return float(unique[0])
+
+
+def _dynamic_fit_record(frame: pd.DataFrame) -> dict[str, float | int]:
+    fit = fit_dynamic_exponent(frame["xi_scaled"], frame["tau0_num"])
+    return {
+        "n_points": int(fit["n_points"]),
+        "A": float(fit["amplitude"]),
+        "z": float(fit["z"]),
+        "z_standard_error": float(fit["z_se"]),
+        "z_ci_low": float(fit["z_ci_low"]),
+        "z_ci_high": float(fit["z_ci_high"]),
+        "r2": float(fit["r2"]),
+    }
+
+
+def build_fully_numeric_combined_analysis(
+    points: pd.DataFrame,
+    *,
+    lattice_spacing: float,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Remove the known kappa_R prefactor and fit all reliable points together."""
+    required = [
+        "R", "N", "delta", "Gamma0_num", "Gamma0_source", "tau0_num", "xi_bnd",
+        "epsilon_fraction", "fit_reliable", "converged", "Gamma0_reliable", "included",
+    ]
+    _require_columns(points, required, "resultC_dynamic_z_points_fully_numeric.csv")
+    if not math.isfinite(lattice_spacing) or lattice_spacing <= 0.0:
+        raise ValueError("lattice spacing must be positive and finite")
+    frame = points.copy()
+    for column in ("fit_reliable", "converged", "Gamma0_reliable", "included"):
+        frame[column] = _coerce_bool(frame[column])
+    invalid_sources = frame[frame["Gamma0_source"] != FULL_NUMERIC_GAMMA_SOURCE]
+    if not invalid_sources.empty:
+        raise ValueError("combined collapse rejects non-numerical Gamma0 sources")
+    frame = frame[
+        frame["R"].isin(FULL_NUMERIC_R_VALUES)
+        & frame["included"]
+        & (frame["delta"] <= PRIMARY_DELTA_MAX * (1.0 + 1e-12))
+    ].copy()
+    frame["kappa_R"] = [
+        kappa_R_theory(int(R), lattice_spacing) for R in frame["R"]
+    ]
+    frame["xi_scaled"] = frame["xi_bnd"] / np.sqrt(frame["kappa_R"])
+    frame["collapse_ratio"] = (
+        frame["kappa_R"] * frame["tau0_num"] / frame["xi_bnd"] ** 2
+    )
+    positive_columns = ["Gamma0_num", "tau0_num", "xi_bnd", "kappa_R", "xi_scaled", "collapse_ratio"]
+    valid = np.ones(len(frame), dtype=bool)
+    for column in positive_columns:
+        valid &= np.isfinite(frame[column]) & (frame[column] > 0.0)
+    frame = frame[valid].copy()
+    combined = frame.rename(
+        columns={
+            "epsilon_fraction": "epsilon",
+            "Gamma0_reliable": "gamma_reliable",
+            "fit_reliable": "boundary_fit_reliable",
+        }
+    )[
+        [
+            "R", "N", "delta", "epsilon", "Gamma0_num", "tau0_num", "xi_bnd",
+            "kappa_R", "xi_scaled", "collapse_ratio", "Gamma0_source",
+            "gamma_reliable", "boundary_fit_reliable", "converged",
+        ]
+    ].sort_values(["R", "delta"]).reset_index(drop=True)
+    if len(combined) < 2:
+        raise ValueError("combined collapse requires at least two reliable finite points")
+
+    expected_pairs = {
+        (R, f"{delta:.12g}") for R in FULL_NUMERIC_R_VALUES for delta in FULL_NUMERIC_DELTAS
+    }
+    actual_pairs = {
+        (int(row.R), f"{float(row.delta):.12g}") for row in combined.itertuples()
+    }
+    all_fit = _dynamic_fit_record(combined)
+    per_R_smallest_3: list[dict[str, Any]] = []
+    per_R_smallest_2: list[dict[str, Any]] = []
+    smallest_2_frames: list[pd.DataFrame] = []
+    smallest_3_frames: list[pd.DataFrame] = []
+    for R in FULL_NUMERIC_R_VALUES:
+        group = combined[combined["R"] == R].nsmallest(3, "delta")
+        if len(group) >= 3:
+            per_R_smallest_3.append({"R": R, **_dynamic_fit_record(group)})
+            smallest_3_frames.append(group)
+        pair = group.nsmallest(2, "delta")
+        if len(pair) >= 2:
+            per_R_smallest_2.append({"R": R, **_dynamic_fit_record(pair)})
+            smallest_2_frames.append(pair)
+    smallest_2 = pd.concat(smallest_2_frames, ignore_index=True)
+    smallest_3 = pd.concat(smallest_3_frames, ignore_index=True)
+    ratios = combined["collapse_ratio"].to_numpy(dtype=float)
+    summary: dict[str, Any] = {
+        "git_sha": _git_sha(),
+        "script_version": SCRIPT_VERSION,
+        "selected_R_values": list(FULL_NUMERIC_R_VALUES),
+        "selected_delta_values": list(FULL_NUMERIC_DELTAS),
+        "number_of_points": int(len(combined)),
+        "Gamma0_source": FULL_NUMERIC_GAMMA_SOURCE,
+        "Gamma0_definition": "Gamma0_num = Gamma_from_lambda; tau0_num = 1/Gamma0_num",
+        "spatial_observable": "boundary-induced xi_bnd from the same deterministic Gaussian closure",
+        "lattice_spacing_a": float(lattice_spacing),
+        "kappa_definition": "kappa_R = a^2 (R+1)(2R+1)/12",
+        "xi_scaled_definition": "xi_scaled = xi_bnd/sqrt(kappa_R)",
+        "combined_fit_all_20": all_fit,
+        "per_R_smallest_3_delta_fits": per_R_smallest_3,
+        "per_R_smallest_2_delta_fits": per_R_smallest_2,
+        "combined_smallest_3_delta_fit": _dynamic_fit_record(smallest_3),
+        "combined_smallest_2_delta_fit": _dynamic_fit_record(smallest_2),
+        "collapse_ratio_definition": "kappa_R*tau0_num/xi_bnd^2",
+        "collapse_ratio_statistics": {
+            "mean": float(np.mean(ratios)),
+            "min": float(np.min(ratios)),
+            "max": float(np.max(ratios)),
+            "standard_deviation_population": float(np.std(ratios, ddof=0)),
+            "maximum_absolute_deviation_from_1": float(np.max(np.abs(ratios - 1.0))),
+        },
+        "all_20_points_present": actual_pairs == expected_pairs,
+        "all_20_points_passed_reliability_criteria": bool(
+            actual_pairs == expected_pairs
+            and combined["gamma_reliable"].all()
+            and combined["boundary_fit_reliable"].all()
+            and combined["converged"].all()
+        ),
+        "regression_uncertainty_note": (
+            "The 95% interval measures residual scatter about a pure power law in "
+            "deterministic data; it is not stochastic sampling uncertainty."
+        ),
+        "scientific_wording": {
+            "main": "Fully numerical normalized space-time collapse",
+            "protocols": "q=0 temporal relaxation and boundary-induced spatial length",
+            "normalization": "R-dependent kernel prefactor removed by xi_bnd/sqrt(kappa_R)",
+            "interpretation": "z_eff approaches 2 toward the spinodal",
+            "raw_caption": "Raw coordinates retain the R-dependent prefactor 1/kappa_R.",
+        },
+    }
+    return combined, summary
+
+
 def build_boundary_transmission(
     profiles: pd.DataFrame, xi_table: pd.DataFrame
 ) -> pd.DataFrame:
@@ -554,9 +726,9 @@ def _select_representative_conditions(table: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(selected)
 
 
-def _save_figure(fig: plt.Figure, path: Path) -> Path:
+def _save_figure(fig: plt.Figure, path: Path, *, dpi: int = 240) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=240, bbox_inches="tight")
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return path
 
@@ -829,6 +1001,74 @@ def make_fully_numeric_z_figures(
     return paths
 
 
+def make_fully_numeric_combined_figures(
+    figures_dir: Path,
+    combined_points: pd.DataFrame,
+    combined_summary: dict[str, Any],
+) -> list[Path]:
+    """Plot the normalized one-axis poster candidate and raw diagnostic."""
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    colors = dict(zip(FULL_NUMERIC_R_VALUES, plt.cm.viridis(np.linspace(0.05, 0.95, 5))))
+    markers = {6: "o", 12: "s", 24: "^", 48: "D", 96: "v"}
+    fit = combined_summary["combined_fit_all_20"]
+    paths: list[Path] = []
+
+    fig, ax = plt.subplots(figsize=(7.6, 5.5), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = combined_points[combined_points["R"] == R].sort_values("xi_scaled")
+        ax.plot(group["xi_scaled"], group["tau0_num"], color=colors[R], lw=0.8, alpha=0.35)
+        ax.scatter(
+            group["xi_scaled"], group["tau0_num"], marker=markers[R],
+            color=colors[R], edgecolor="white", linewidth=0.7, s=68,
+            zorder=3, label=f"R={R}",
+        )
+    x_min = float(combined_points["xi_scaled"].min())
+    x_max = float(combined_points["xi_scaled"].max())
+    x_line = np.logspace(np.log10(0.92 * x_min), np.log10(1.08 * x_max), 300)
+    ax.loglog(x_line, x_line**2, color="black", lw=2.4, label="Theory: z = 2", zorder=2)
+    ax.loglog(
+        x_line, float(fit["A"]) * x_line ** float(fit["z"]),
+        color="0.4", linestyle="--", lw=1.4, zorder=1,
+    )
+    ax.text(
+        0.97, 0.05, rf"$z_{{\rm eff,combined}}={fit['z']:.3f}$",
+        transform=ax.transAxes, ha="right", va="bottom", fontsize=13,
+        bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "edgecolor": "0.75", "alpha": 0.9},
+    )
+    ax.set_xlabel(r"$\xi_{\rm bnd}/\sqrt{\kappa_R}$", fontsize=16)
+    ax.set_ylabel(r"$\tau_{0,\rm num}=1/\Gamma_{0,\rm num}$", fontsize=16)
+    ax.tick_params(axis="both", which="both", labelsize=12)
+    ax.grid(which="both", alpha=0.18)
+    ax.legend(fontsize=11, ncol=2, frameon=True)
+    paths.append(
+        _save_figure(
+            fig, figures_dir / "03_fully_numeric_dynamic_z_combined.png", dpi=320
+        )
+    )
+
+    fig, ax = plt.subplots(figsize=(7.6, 5.5), constrained_layout=True)
+    for R in FULL_NUMERIC_R_VALUES:
+        group = combined_points[combined_points["R"] == R].sort_values("xi_bnd")
+        ax.plot(group["xi_bnd"], group["tau0_num"], color=colors[R], lw=0.9, alpha=0.45)
+        ax.scatter(
+            group["xi_bnd"], group["tau0_num"], marker=markers[R], color=colors[R],
+            edgecolor="white", linewidth=0.6, s=62, zorder=3, label=f"R={R}",
+        )
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel(r"$\xi_{\rm bnd}$", fontsize=14)
+    ax.set_ylabel(r"$\tau_{0,\rm num}$", fontsize=14)
+    ax.set_title(r"Raw coordinates retain the R-dependent prefactor $1/\kappa_R$", fontsize=13)
+    ax.tick_params(axis="both", which="both", labelsize=11)
+    ax.grid(which="both", alpha=0.2)
+    ax.legend(fontsize=10, ncol=2)
+    paths.append(
+        _save_figure(
+            fig, figures_dir / "03_fully_numeric_dynamic_z_combined_raw.png", dpi=320
+        )
+    )
+    return paths
+
+
 def _representative_phase6(xi_table: pd.DataFrame) -> tuple[int, float, pd.DataFrame]:
     frame = xi_table.copy()
     for column in ("primary_epsilon", "converged", "fit_reliable"):
@@ -979,6 +1219,9 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
     )
     fully_numeric_points = pd.DataFrame()
     fully_numeric_summary = pd.DataFrame()
+    combined_points = pd.DataFrame()
+    combined_summary: dict[str, Any] = {}
+    combined_summary_path: Path | None = None
     q0_numeric = pd.DataFrame()
     fully_numeric_figure_paths: list[Path] = []
     fully_numeric_requested = args.fully_numeric_only or args.q0_numeric_master.is_file()
@@ -991,6 +1234,10 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         q0_numeric = pd.read_csv(args.q0_numeric_master)
         fully_numeric_points, fully_numeric_summary = build_fully_numeric_dynamic_z_tables(
             xi, q0_numeric
+        )
+        lattice_spacing = infer_q0_lattice_spacing(q0_numeric)
+        combined_points, combined_summary = build_fully_numeric_combined_analysis(
+            fully_numeric_points, lattice_spacing=lattice_spacing
         )
     transmission = build_boundary_transmission(profiles, xi)
 
@@ -1009,6 +1256,7 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
             {
                 "C_z_points_fully_numeric": output_root / "resultC_dynamic_z_points_fully_numeric.csv",
                 "C_z_summary_fully_numeric": output_root / "resultC_dynamic_z_summary_fully_numeric.csv",
+                "C_z_combined_points": output_root / "fully_numeric_dynamic_z_combined_points.csv",
             }
         )
     for frame, key in (
@@ -1020,6 +1268,7 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
     if fully_numeric_requested:
         fully_numeric_points.to_csv(table_paths["C_z_points_fully_numeric"], index=False)
         fully_numeric_summary.to_csv(table_paths["C_z_summary_fully_numeric"], index=False)
+        combined_points.to_csv(table_paths["C_z_combined_points"], index=False)
 
     figure_paths = []
     figure_paths.extend(make_result_b_figures(figures_dir, b_precision, b_collapse))
@@ -1031,9 +1280,32 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         transmission, profiles, xi,
     )
     if fully_numeric_requested:
-        fully_numeric_figure_paths = make_fully_numeric_z_figures(
+        fully_numeric_figure_paths.extend(make_fully_numeric_z_figures(
             figures_dir / "fully_numeric_z", q0_numeric,
             fully_numeric_points, fully_numeric_summary,
+        ))
+        fully_numeric_figure_paths.extend(make_fully_numeric_combined_figures(
+            figures_dir / "fully_numeric_z", combined_points, combined_summary
+        ))
+        combined_summary_path = output_root / "fully_numeric_dynamic_z_combined_summary.json"
+        combined_summary["output_files"] = {
+            "points_csv": str(table_paths["C_z_combined_points"]),
+            "normalized_poster_figure": str(
+                figures_dir / "fully_numeric_z" / "03_fully_numeric_dynamic_z_combined.png"
+            ),
+            "raw_diagnostic_figure": str(
+                figures_dir / "fully_numeric_z" / "03_fully_numeric_dynamic_z_combined_raw.png"
+            ),
+            "five_panel_backup": str(
+                figures_dir / "fully_numeric_z" / "03_fully_numeric_dynamic_z.png"
+            ),
+        }
+        combined_summary_path.write_text(
+            json.dumps(
+                _json_safe(combined_summary), indent=2, ensure_ascii=False,
+                allow_nan=False,
+            ) + "\n",
+            encoding="utf-8",
         )
 
     reliable_epsilon = epsilon[epsilon["fit_reliable"] & epsilon["converged"]]
@@ -1121,6 +1393,7 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
                 float((q0_numeric["Gamma0_num"] - q0_numeric["Gamma0_logfit"]).abs().max())
                 if "Gamma0_logfit" in q0_numeric else None
             ),
+            "normalized_combined_collapse": combined_summary,
         }
     validation = {
         "script_version": SCRIPT_VERSION,
@@ -1175,11 +1448,19 @@ def run_analysis(args: argparse.Namespace) -> list[Path]:
         },
     }
     validation_path = output_root / "poster_final_validation_summary.json"
-    validation_path.write_text(json.dumps(validation, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return [
+    validation_path.write_text(
+        json.dumps(
+            _json_safe(validation), indent=2, ensure_ascii=False, allow_nan=False
+        ) + "\n",
+        encoding="utf-8",
+    )
+    output_paths = [
         *table_paths.values(), validation_path, *figure_paths, *diagnostic_paths,
         *fully_numeric_figure_paths,
     ]
+    if combined_summary_path is not None:
+        output_paths.append(combined_summary_path)
+    return output_paths
 
 
 def build_parser() -> argparse.ArgumentParser:
