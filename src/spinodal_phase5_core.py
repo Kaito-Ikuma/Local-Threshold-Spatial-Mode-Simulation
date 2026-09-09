@@ -31,10 +31,66 @@ from typing import Any
 import numpy as np
 
 
-SCRIPT_VERSION = "2026.08.16-phase5-v3-followup"
-CHECKPOINT_SCHEMA_VERSION = 2
+SCRIPT_VERSION = "2026.09.09-phase5-v4-largeX"
+CHECKPOINT_SCHEMA_VERSION = 3
 MICROSCOPIC_KERNELS = ("aggregated_exact", "direct_J")
 INITIALIZATION_MODES = ("prepared_metastable", "bernoulli_meanfield")
+RNG_COUPLING_MODES = ("independent_modes", "common_modes")
+
+
+def long_wavelength_q_grid(
+    N: int,
+    R: int,
+    lattice_spacing: float = 1.0,
+    *,
+    calibration_qR_max: float = 0.15,
+    validation_qR_max: float = 0.35,
+) -> list[dict[str, float | int | str]]:
+    """Generate q=0, calibration and held-out validation modes from N and R."""
+    if N < 8 or R < 1 or 2 * R >= N or lattice_spacing <= 0.0:
+        raise ValueError("invalid lattice for long-wavelength q grid")
+    if not 0.0 < calibration_qR_max < validation_qR_max:
+        raise ValueError("require 0 < calibration qR max < validation qR max")
+    maximum_mode = int(
+        math.floor(
+            validation_qR_max * N /
+            (2.0 * math.pi * R) + 1e-12
+        )
+    )
+    rows: list[dict[str, float | int | str]] = []
+    for mode in range(maximum_mode + 1):
+        q = 2.0 * math.pi * mode / (N * lattice_spacing)
+        qR = q * R * lattice_spacing
+        set_type = (
+            "q0"
+            if mode == 0
+            else "calibration"
+            if qR <= calibration_qR_max + 1e-14
+            else "validation"
+        )
+        rows.append({"mode_index": mode, "q": q, "qR": qR, "set_type": set_type})
+    return rows
+
+
+def q_grid_signature(
+    rows: list[dict[str, float | int | str]],
+    *,
+    N: int,
+    R: int,
+    lattice_spacing: float,
+    calibration_qR_max: float,
+    validation_qR_max: float,
+) -> str:
+    payload = {
+        "N": int(N),
+        "R": int(R),
+        "lattice_spacing": float(lattice_spacing),
+        "calibration_qR_max": float(calibration_qR_max),
+        "validation_qR_max": float(validation_qR_max),
+        "rows": rows,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -73,6 +129,19 @@ class Phase5Task:
     save_structure_factor: bool = False
     track_survival: bool = False
     unperturbed: bool = False
+    # Defaults deliberately describe the pre-large-X behaviour.  Fingerprint
+    # helpers remove these exact defaults so schema-v1/v2 checkpoints retain
+    # their historical hashes and remain reusable.
+    rng_coupling_mode: str = "independent_modes"
+    survival_criterion_primary: float = 0.90
+    survival_criterion_sensitivity: float = 0.80
+    q_set_type: str = "legacy"
+    q_grid_signature: str = ""
+    fit_protocol: str = "fixed_legacy"
+    campaign_version: str = "legacy"
+    harmonic_orders: tuple[int, ...] = ()
+    survivor_cohort_end: int | None = None
+    epsilon_linearity_validated: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,6 +192,7 @@ class Phase5BlockResult:
     A_q_survive_to_T: np.ndarray
     baseline_m_surviving_current: np.ndarray
     survive_to_T_count: int
+    survivor_cohort_end: int
     checkpoint_schema_version: int
     survival_tracking_enabled: bool
     threshold_checksum: str
@@ -131,6 +201,9 @@ class Phase5BlockResult:
     initialization_mode: str
     task_fingerprint: str
     resume_fingerprint: str
+    harmonic_orders: np.ndarray
+    harmonic_mode_indices: np.ndarray
+    harmonic_amplitudes: np.ndarray
     wall_seconds: float
 
 
@@ -139,6 +212,8 @@ def validate_task(task: Phase5Task) -> None:
         raise ValueError(f"unknown microscopic kernel: {task.microscopic_kernel}")
     if task.initialization_mode not in INITIALIZATION_MODES:
         raise ValueError(f"unknown initialization mode: {task.initialization_mode}")
+    if task.rng_coupling_mode not in RNG_COUPLING_MODES:
+        raise ValueError(f"unknown RNG coupling mode: {task.rng_coupling_mode}")
     if task.N < 8 or task.R < 1 or 2 * task.R >= task.N:
         raise ValueError("Phase5 requires N>=8 and 1<=R<N/2")
     if task.M_total < 1 or task.block_size < 1:
@@ -159,6 +234,18 @@ def validate_task(task: Phase5Task) -> None:
         raise ValueError("float_dtype must be float64 or float32")
     if task.preparation_steps < 1 or task.burn_steps_per_stage < 0:
         raise ValueError("invalid preparation protocol")
+    if not (
+        0.0 < task.survival_criterion_sensitivity
+        <= task.survival_criterion_primary
+        <= 1.0
+    ):
+        raise ValueError("survival criteria must satisfy 0<sensitivity<=primary<=1")
+    if any(order <= 1 or order % 2 == 0 for order in task.harmonic_orders):
+        raise ValueError("harmonic_orders must contain odd integers greater than one")
+    if task.survivor_cohort_end is not None and not (
+        0 <= task.survivor_cohort_end <= task.T
+    ):
+        raise ValueError("survivor_cohort_end must lie within [0,T]")
 
 
 def build_work_units(task: Phase5Task) -> list[Phase5WorkUnit]:
@@ -187,16 +274,34 @@ def build_work_units(task: Phase5Task) -> list[Phase5WorkUnit]:
     return units
 
 
-def make_work_unit_rng(work_unit: Phase5WorkUnit) -> np.random.Generator:
-    """Return a Philox stream keyed only by stable physical work-unit IDs."""
+def work_unit_rng_entropy(work_unit: Phase5WorkUnit) -> list[int]:
+    """Return the stable Philox entropy for one physical block.
+
+    The independent branch is byte-for-byte the historical five-integer
+    entropy.  The opt-in common branch omits only ``mode_index``, coupling
+    thresholds, preparation draws and annealed draws across q while checkpoint
+    identities remain mode-specific.
+    """
     task = work_unit.task
-    entropy = [
+    if task.rng_coupling_mode == "independent_modes":
+        return [
+            int(task.base_seed),
+            int(task.delta_index),
+            int(task.mode_index),
+            int(task.epsilon_index),
+            int(work_unit.block_id),
+        ]
+    return [
         int(task.base_seed),
         int(task.delta_index),
-        int(task.mode_index),
         int(task.epsilon_index),
         int(work_unit.block_id),
     ]
+
+
+def make_work_unit_rng(work_unit: Phase5WorkUnit) -> np.random.Generator:
+    """Return a Philox stream keyed only by stable physical work-unit IDs."""
+    entropy = work_unit_rng_entropy(work_unit)
     return np.random.Generator(np.random.Philox(np.random.SeedSequence(entropy)))
 
 
@@ -205,13 +310,8 @@ def rng_identifier(work_unit: Phase5WorkUnit) -> dict[str, Any]:
     return {
         "generator": "numpy.random.Philox",
         "base_seed": int(task.base_seed),
-        "seed_sequence_entropy": [
-            int(task.base_seed),
-            int(task.delta_index),
-            int(task.mode_index),
-            int(task.epsilon_index),
-            int(work_unit.block_id),
-        ],
+        "seed_sequence_entropy": work_unit_rng_entropy(work_unit),
+        "rng_coupling_mode": task.rng_coupling_mode,
         "delta_index": int(task.delta_index),
         "mode_index": int(task.mode_index),
         "epsilon_index": int(task.epsilon_index),
@@ -222,10 +322,35 @@ def rng_identifier(work_unit: Phase5WorkUnit) -> dict[str, Any]:
     }
 
 
+_LEGACY_DEFAULT_FIELDS = {
+    "rng_coupling_mode": "independent_modes",
+    "survival_criterion_primary": 0.90,
+    "survival_criterion_sensitivity": 0.80,
+    "q_set_type": "legacy",
+    "q_grid_signature": "",
+    "fit_protocol": "fixed_legacy",
+    "campaign_version": "legacy",
+    "harmonic_orders": (),
+    "survivor_cohort_end": None,
+    "epsilon_linearity_validated": False,
+}
+
+
+def _fingerprint_payload(task: Phase5Task) -> dict[str, Any]:
+    payload = asdict(task)
+    if all(payload.get(key) == value for key, value in _LEGACY_DEFAULT_FIELDS.items()):
+        for key in _LEGACY_DEFAULT_FIELDS:
+            payload.pop(key, None)
+    return payload
+
+
 def task_fingerprint(task: Phase5Task) -> str:
     """Hash every simulation-setting field used to validate resume files."""
     serialized = json.dumps(
-        asdict(task), sort_keys=True, separators=(",", ":"), allow_nan=False
+        _fingerprint_payload(task),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(serialized).hexdigest()
 
@@ -238,7 +363,7 @@ def resume_fingerprint(task: Phase5Task) -> str:
     excludes only this field lets a 32768-trial run grow to 65536 trials while
     still rejecting changes to N, R, seed, preparation, or any other setting.
     """
-    payload = asdict(task)
+    payload = _fingerprint_payload(task)
     payload.pop("M_total")
     serialized = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
@@ -275,7 +400,7 @@ def legacy_M_extension_matches(
 
 def legacy_task_fingerprint(task: Phase5Task) -> str:
     """Return the pre-follow-up fingerprint used by schema-v1 checkpoints."""
-    payload = asdict(task)
+    payload = _fingerprint_payload(task)
     payload.pop("track_survival", None)
     payload.pop("unperturbed", None)
     serialized = json.dumps(
@@ -555,6 +680,12 @@ def cosine_amplitude_batch(
     return factor * (array @ cosine) / N
 
 
+def folded_harmonic_mode(mode_index: int, order: int, N: int) -> int:
+    """Map an integer harmonic onto the real-valued rFFT/Nyquist mode."""
+    raw = (int(mode_index) * int(order)) % int(N)
+    return int(N - raw if raw > N // 2 else raw)
+
+
 def apply_paired_mode_perturbation(
     base_states: np.ndarray,
     *,
@@ -666,6 +797,14 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         if task.save_structure_factor
         else np.empty((0, 0), dtype=float)
     )
+    harmonic_mode_indices = np.asarray(
+        [folded_harmonic_mode(task.mode_index, order, task.N) for order in task.harmonic_orders],
+        dtype=np.int64,
+    )
+    harmonic_orders = np.asarray(task.harmonic_orders, dtype=np.int64)
+    harmonic_amplitudes = np.empty(
+        (len(harmonic_mode_indices), task.T + 1), dtype=float
+    )
     empty = np.empty(0, dtype=float)
     escape_cumulative = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
     survival_fraction = np.empty(task.T + 1, dtype=float) if task.track_survival else empty.copy()
@@ -679,12 +818,19 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         else np.empty((0, 0), dtype=float)
     )
     alive = np.ones(work_unit.block_n, dtype=bool)
+    cohort_end = task.T if task.survivor_cohort_end is None else task.survivor_cohort_end
+    cohort_alive: np.ndarray | None = None
 
     def record(index: int) -> None:
+        nonlocal cohort_alive
         plus_profile = states_plus.mean(axis=0, dtype=float)
         minus_profile = states_minus.mean(axis=0, dtype=float)
         response = 0.5 * (plus_profile - minus_profile)
         A_q[index] = cosine_amplitude(response, task.mode_index, task.lattice_spacing)
+        for harmonic_index, folded_mode in enumerate(harmonic_mode_indices):
+            harmonic_amplitudes[harmonic_index, index] = cosine_amplitude(
+                response, int(folded_mode), task.lattice_spacing
+            )
         mean_plus[index] = float(np.mean(plus_profile))
         mean_minus[index] = float(np.mean(minus_profile))
         baseline[index] = 0.5 * (mean_plus[index] + mean_minus[index])
@@ -692,6 +838,8 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         if task.track_survival:
             escaped_now = _escape_mask(states_plus, states_minus, task)
             alive[:] = alive & ~escaped_now
+            if index == cohort_end:
+                cohort_alive = alive.copy()
             trial_response = 0.5 * (
                 states_plus.astype(float) - states_minus.astype(float)
             )
@@ -738,9 +886,11 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         raise RuntimeError("quenched thresholds changed during simulation")
 
     if task.track_survival:
-        survive_to_T_count = int(np.sum(alive))
+        if cohort_alive is None:
+            raise RuntimeError("fixed survivor cohort end was not recorded")
+        survive_to_T_count = int(np.sum(cohort_alive))
         survive_to_T_sum = np.sum(
-            trial_amplitude_history[alive], axis=0, dtype=float
+            trial_amplitude_history[cohort_alive], axis=0, dtype=float
         )
         A_survive_to_T = (
             survive_to_T_sum / survive_to_T_count
@@ -786,6 +936,7 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         A_q_survive_to_T=A_survive_to_T,
         baseline_m_surviving_current=baseline_surviving_current,
         survive_to_T_count=survive_to_T_count,
+        survivor_cohort_end=cohort_end,
         checkpoint_schema_version=CHECKPOINT_SCHEMA_VERSION,
         survival_tracking_enabled=task.track_survival,
         threshold_checksum=threshold_checksum,
@@ -794,6 +945,9 @@ def simulate_microscopic_block(work_unit: Phase5WorkUnit) -> Phase5BlockResult:
         initialization_mode=task.initialization_mode,
         task_fingerprint=task_fingerprint(task),
         resume_fingerprint=resume_fingerprint(task),
+        harmonic_orders=harmonic_orders,
+        harmonic_mode_indices=harmonic_mode_indices,
+        harmonic_amplitudes=harmonic_amplitudes,
         wall_seconds=time.perf_counter() - start,
     )
 
@@ -831,6 +985,9 @@ def save_block_checkpoint(result: Phase5BlockResult, path: Path) -> None:
             survive_to_T_amplitude_sum=result.survive_to_T_amplitude_sum,
             A_q_survive_to_T=result.A_q_survive_to_T,
             baseline_m_surviving_current=result.baseline_m_surviving_current,
+            harmonic_orders=result.harmonic_orders,
+            harmonic_mode_indices=result.harmonic_mode_indices,
+            harmonic_amplitudes=result.harmonic_amplitudes,
         )
         handle.flush()
         os.fsync(handle.fileno())
@@ -871,6 +1028,9 @@ def load_block_checkpoint(
                 "survive_to_T_amplitude_sum",
                 "A_q_survive_to_T",
                 "baseline_m_surviving_current",
+                "harmonic_orders",
+                "harmonic_mode_indices",
+                "harmonic_amplitudes",
             }
             for name in optional & set(archive.files):
                 arrays[name] = np.asarray(archive[name]).copy()
@@ -930,7 +1090,7 @@ def load_block_checkpoint(
             stored_resume = metadata.get("resume_fingerprint")
             append_compatible = (
                 not stored_resume
-                and schema_version == 2
+                and schema_version >= 2
                 and legacy_M_extension_matches(
                     str(metadata.get("task_fingerprint", "")), expected_unit
                 )
@@ -963,6 +1123,13 @@ def load_block_checkpoint(
             for name in survival_time_arrays:
                 if name not in arrays or arrays[name].shape != expected_time_shape:
                     raise ValueError(f"checkpoint {name} shape mismatch")
+        if expected_unit.task.harmonic_orders:
+            expected_orders = np.asarray(expected_unit.task.harmonic_orders, dtype=np.int64)
+            if not np.array_equal(arrays.get("harmonic_orders"), expected_orders):
+                raise ValueError("checkpoint harmonic orders mismatch")
+            expected_harmonic_shape = (len(expected_orders), expected_unit.task.T + 1)
+            if arrays.get("harmonic_amplitudes", np.empty(0)).shape != expected_harmonic_shape:
+                raise ValueError("checkpoint harmonic amplitude shape mismatch")
     core_array_names = {
         "A_q",
         "mean_m_plus",
@@ -981,6 +1148,9 @@ def load_block_checkpoint(
     metadata.setdefault("checkpoint_schema_version", 1)
     metadata.setdefault("survival_tracking_enabled", False)
     metadata.setdefault("survive_to_T_count", 0)
+    metadata.setdefault(
+        "survivor_cohort_end", len(arrays.get("A_q", ())) - 1
+    )
     metadata.setdefault("resume_fingerprint", "")
     arrays.setdefault("escape_fraction_cumulative", np.empty(0, dtype=float))
     arrays.setdefault("survival_fraction_cumulative", np.empty(0, dtype=float))
@@ -990,6 +1160,9 @@ def load_block_checkpoint(
     arrays.setdefault("survive_to_T_amplitude_sum", np.empty(0, dtype=float))
     arrays.setdefault("A_q_survive_to_T", np.empty(0, dtype=float))
     arrays.setdefault("baseline_m_surviving_current", np.empty(0, dtype=float))
+    arrays.setdefault("harmonic_orders", np.empty(0, dtype=np.int64))
+    arrays.setdefault("harmonic_mode_indices", np.empty(0, dtype=np.int64))
+    arrays.setdefault("harmonic_amplitudes", np.empty((0, 0), dtype=float))
     try:
         return Phase5BlockResult(**metadata, **arrays)
     except TypeError as exc:

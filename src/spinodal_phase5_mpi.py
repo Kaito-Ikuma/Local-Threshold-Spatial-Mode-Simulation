@@ -24,6 +24,8 @@ from spinodal_phase5_analysis import (
     write_phase5_analysis,
 )
 from spinodal_phase5_core import (
+    CHECKPOINT_SCHEMA_VERSION,
+    RNG_COUPLING_MODES,
     SCRIPT_VERSION,
     Phase5Task,
     Phase5WorkUnit,
@@ -31,6 +33,10 @@ from spinodal_phase5_core import (
     build_work_units,
     checkpoint_is_valid,
     checkpoint_path,
+    long_wavelength_q_grid,
+    q_grid_signature,
+    peak_rss_mb,
+    load_block_checkpoint,
     save_block_checkpoint,
     simulate_microscopic_block,
 )
@@ -333,6 +339,16 @@ def build_phase5_tasks(
     track_survival: bool = False,
     unperturbed: bool = False,
     task_id_prefix: str = "",
+    rng_coupling_mode: str = "independent_modes",
+    survival_criterion_primary: float = 0.90,
+    survival_criterion_sensitivity: float = 0.80,
+    q_set_by_mode: dict[int, str] | None = None,
+    q_grid_signature_value: str = "",
+    fit_protocol: str = "fixed_legacy",
+    campaign_version: str = "legacy",
+    harmonic_orders: Sequence[int] = (),
+    survivor_cohort_end: int | None = None,
+    epsilon_linearity_validated: bool = False,
 ) -> list[Phase5Task]:
     inputs = summary["inputs"]
     R = int(inputs["R"])
@@ -407,6 +423,16 @@ def build_phase5_tasks(
                         save_structure_factor=save_structure_factor,
                         track_survival=track_survival,
                         unperturbed=unperturbed,
+                        rng_coupling_mode=rng_coupling_mode,
+                        survival_criterion_primary=survival_criterion_primary,
+                        survival_criterion_sensitivity=survival_criterion_sensitivity,
+                        q_set_type=(q_set_by_mode or {}).get(int(mode_index), "legacy"),
+                        q_grid_signature=q_grid_signature_value,
+                        fit_protocol=fit_protocol,
+                        campaign_version=campaign_version,
+                        harmonic_orders=tuple(int(order) for order in harmonic_orders),
+                        survivor_cohort_end=survivor_cohort_end,
+                        epsilon_linearity_validated=epsilon_linearity_validated,
                     )
                 )
     return tasks
@@ -546,6 +572,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--N", type=int, default=1024)
     parser.add_argument("--deltas", type=parse_float_list, default=DEFAULT_DELTAS)
     parser.add_argument("--modes", type=parse_int_list, default=DEFAULT_MODES)
+    parser.add_argument(
+        "--auto-q-grid",
+        action="store_true",
+        help="derive all q=0/calibration/held-out validation modes from N,R",
+    )
+    parser.add_argument("--calibration-qR-max", type=float, default=0.15)
+    parser.add_argument("--validation-qR-max", type=float, default=0.35)
     parser.add_argument("--epsilon-fraction", type=float, default=0.05)
     parser.add_argument("--epsilon-fractions", type=parse_float_list, default=())
     parser.add_argument("--M-total", type=int, default=2048)
@@ -564,6 +597,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--float-dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--base-seed", type=int, default=20260815)
     parser.add_argument(
+        "--rng-coupling-mode", choices=RNG_COUPLING_MODES, default="independent_modes"
+    )
+    parser.add_argument("--survival-criterion-primary", type=float, default=0.90)
+    parser.add_argument("--survival-criterion-sensitivity", type=float, default=0.80)
+    parser.add_argument("--fit-protocol", default="fixed_legacy")
+    parser.add_argument("--campaign-version", default="legacy")
+    parser.add_argument("--harmonic-orders", type=parse_int_list, default=())
+    parser.add_argument(
+        "--survivor-cohort-end", type=int, default=None,
+        help="freeze the survivor cohort at this pre-specified fit-end time",
+    )
+    parser.add_argument(
+        "--epsilon-linearity-validated", action="store_true",
+        help="record that this production epsilon was selected by the prior scout",
+    )
+    parser.add_argument(
         "--task-id-prefix",
         default="",
         help="optional stable prefix; R sweeps use labels such as R006_",
@@ -576,6 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-only", action="store_true")
     parser.add_argument("--benchmark-block-sizes", type=parse_int_list, default=(16, 32, 64, 128))
     parser.add_argument("--benchmark-steps", type=int, default=50)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="write the resolved task/assignment plan without simulating",
+    )
     parser.add_argument(
         "--figures",
         action=argparse.BooleanOptionalAction,
@@ -613,11 +667,35 @@ def main() -> None:
     root_payload = None
     if IS_ROOT:
         try:
+            modes = tuple(args.modes)
+            q_rows: list[dict[str, Any]] = []
+            q_set_by_mode: dict[int, str] = {}
+            q_signature = ""
+            if args.auto_q_grid:
+                q_rows = long_wavelength_q_grid(
+                    args.N,
+                    args.R,
+                    args.lattice_spacing,
+                    calibration_qR_max=args.calibration_qR_max,
+                    validation_qR_max=args.validation_qR_max,
+                )
+                modes = tuple(int(row["mode_index"]) for row in q_rows)
+                q_set_by_mode = {
+                    int(row["mode_index"]): str(row["set_type"]) for row in q_rows
+                }
+                q_signature = q_grid_signature(
+                    q_rows,
+                    N=args.N,
+                    R=args.R,
+                    lattice_spacing=args.lattice_spacing,
+                    calibration_qR_max=args.calibration_qR_max,
+                    validation_qR_max=args.validation_qR_max,
+                )
             if args.analytic_references:
                 summary, phase0, closure_mode, closure_dispersion = (
                     build_analytic_phase5_references(
                         deltas=args.deltas,
-                        modes=args.modes,
+                        modes=modes,
                         N=args.N,
                         B=args.B,
                         R=args.R,
@@ -626,7 +704,9 @@ def main() -> None:
                         phi_bar=args.phi_bar,
                         lattice_spacing=args.lattice_spacing,
                         branch=args.branch,
-                        qR_max_fit=args.qR_max_fit,
+                        qR_max_fit=(
+                            args.calibration_qR_max if args.auto_q_grid else args.qR_max_fit
+                        ),
                     )
                 )
             else:
@@ -647,7 +727,7 @@ def main() -> None:
                 phase0,
                 closure_mode,
                 deltas=args.deltas,
-                modes=args.modes,
+                modes=modes,
                 epsilon_fractions=epsilon_fractions,
                 N=args.N,
                 M_total=args.M_total,
@@ -669,6 +749,16 @@ def main() -> None:
                 track_survival=args.track_survival,
                 unperturbed=args.unperturbed,
                 task_id_prefix=args.task_id_prefix,
+                rng_coupling_mode=args.rng_coupling_mode,
+                survival_criterion_primary=args.survival_criterion_primary,
+                survival_criterion_sensitivity=args.survival_criterion_sensitivity,
+                q_set_by_mode=q_set_by_mode,
+                q_grid_signature_value=q_signature,
+                fit_protocol=args.fit_protocol,
+                campaign_version=args.campaign_version,
+                harmonic_orders=args.harmonic_orders,
+                survivor_cohort_end=args.survivor_cohort_end,
+                epsilon_linearity_validated=args.epsilon_linearity_validated,
             )
             all_units = [unit for task in tasks for unit in build_work_units(task)]
             assignments = weighted_lpt_assignment(all_units, WORLD_SIZE)
@@ -680,6 +770,7 @@ def main() -> None:
                 "tasks": tasks,
                 "all_units": all_units,
                 "assignments": assignments,
+                "q_grid": q_rows,
             }
             args.output_dir.mkdir(parents=True, exist_ok=True)
             (args.output_dir / "environment.json").write_text(
@@ -696,11 +787,14 @@ def main() -> None:
                     "script_version": SCRIPT_VERSION,
                     "mpi_world_size": WORLD_SIZE,
                     "epsilon_fractions_resolved": epsilon_fractions,
+                    "modes_resolved": modes,
+                    "q_grid": q_rows,
+                    "q_grid_signature": q_signature,
                     "n_logical_tasks": len(tasks),
                     "n_work_units": len(all_units),
                     "rng_rank_independent": True,
                     "space_decomposition": False,
-                    "checkpoint_schema_version": 2,
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
                     "survival_tracking_enabled": bool(args.track_survival),
                     "unperturbed_baseline": bool(args.unperturbed),
                 }
@@ -718,6 +812,21 @@ def main() -> None:
         parser.error(root_payload["error"] if root_payload else "root setup failed")
 
     summary = root_payload["summary"]
+    if args.dry_run:
+        if IS_ROOT:
+            dry_plan = {
+                "dry_run": True,
+                "simulation_performed": False,
+                "tasks": [asdict(task) for task in root_payload["tasks"]],
+                "q_grid": root_payload.get("q_grid", []),
+                "assignment": assignment_payload(root_payload["assignments"]),
+            }
+            (args.output_dir / "phase5_dry_run_plan.json").write_text(
+                json.dumps(dry_plan, indent=2) + "\n", encoding="utf-8"
+            )
+            print(args.output_dir / "phase5_dry_run_plan.json", flush=True)
+        COMM.Barrier()
+        return
     if args.benchmark_only:
         if IS_ROOT:
             row = _find_row(pd.DataFrame(root_payload["phase0"]), float(args.deltas[0]))
@@ -747,9 +856,23 @@ def main() -> None:
     stopped_for_runtime = False
     for unit in local_units:
         path = checkpoint_path(blocks_dir, unit)
-        if args.resume and checkpoint_is_valid(path, unit):
-            skipped.append(unit.unit_id)
-            continue
+        if args.resume and path.is_file():
+            try:
+                load_block_checkpoint(path, unit)
+            except ValueError as exc:
+                message = str(exc)
+                mismatch_markers = (
+                    "task configuration mismatch", "unit mismatch",
+                    "block size mismatch", "start_trial mismatch", "end_trial mismatch",
+                )
+                if any(marker in message for marker in mismatch_markers):
+                    raise RuntimeError(
+                        f"refusing to overwrite config-mismatched checkpoint {path}: {exc}"
+                    ) from exc
+                # A truncated/corrupt checkpoint is safe to replace atomically.
+            else:
+                skipped.append(unit.unit_id)
+                continue
         if (
             args.max_runtime_seconds is not None
             and time.perf_counter() - rank_start >= args.max_runtime_seconds
@@ -766,6 +889,7 @@ def main() -> None:
         "skipped_valid_checkpoint": skipped,
         "stopped_for_runtime": stopped_for_runtime,
         "wall_seconds": time.perf_counter() - rank_start,
+        "peak_rss_mb": peak_rss_mb(),
     }
     reports = COMM.gather(local_report, root=0)
 
